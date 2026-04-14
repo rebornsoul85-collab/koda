@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { initializeApp } from "firebase/app";
-import { getDatabase, ref, set, get } from "firebase/database";
+import { getDatabase, ref, set, get, onValue } from "firebase/database";
 
 /* ══════════════════════════════════════════
    FIREBASE
@@ -168,35 +168,83 @@ export default function App() {
       const s = document.createElement('style'); s.id='koda-css'; s.textContent=GLOBAL_CSS;
       document.head.appendChild(s);
     }
-    loadAll();
-  }, []);
 
-  const loadAll = async () => {
-    const raw = await S.get('cm-config');
-    const cfg = raw ? JSON.parse(raw) : DEFAULT;
-    setConfig(cfg);
+    // ── Load static config data once ──────────────────────────────
+    const loadStatic = async () => {
+      const [rawCfg, rawRwds] = await Promise.all([
+        S.get('cm-config'),
+        S.get('cm-rewards'),
+      ]);
+      setConfig(rawCfg ? JSON.parse(rawCfg) : DEFAULT);
+      setRewards(rawRwds ? JSON.parse(rawRwds) : DEFAULT_REWARDS);
+      setLoading(false);
+    };
+    loadStatic();
+
+    // ── Real-time listeners for all dynamic data ──────────────────
+    // These fire immediately with current data AND whenever it changes,
+    // so the parent dashboard always stays up to date in real time.
     const today = TODAY();
-    const [ib,jc,ibB,jcB,ibP,jcP,ibG,jcG,rwds,reqs] = await Promise.all([
-      S.get(`cm-c-isabella-${today}`), S.get(`cm-c-jocelyn-${today}`),
-      S.get('cm-b-isabella'),          S.get('cm-b-jocelyn'),
-      S.get(`cm-proofs-isabella-${today}`), S.get(`cm-proofs-jocelyn-${today}`),
-      S.get(`cm-goal-isabella-${today}`),   S.get(`cm-goal-jocelyn-${today}`),
-      S.get('cm-rewards'),                  S.get('cm-reward-requests'),
-    ]);
-    setComp({   isabella: ib  ? JSON.parse(ib)  : [], jocelyn: jc  ? JSON.parse(jc)  : [] });
-    setBal({    isabella: ibB ? parseInt(ibB)    : 0,  jocelyn: jcB ? parseInt(jcB)   : 0  });
-    setProofs({ isabella: ibP ? JSON.parse(ibP) : {}, jocelyn: jcP ? JSON.parse(jcP) : {} });
-    setGoals({  isabella: ibG || '', jocelyn: jcG || '' });
-    setRewards( rwds ? JSON.parse(rwds) : DEFAULT_REWARDS );
-    setRewardReqs( reqs ? JSON.parse(reqs) : [] );
-    setLoading(false);
-  };
+    const unsubs = [];
+
+    const listen = (key, fn) => {
+      const unsubscribe = onValue(ref(db, key), snap => {
+        fn(snap.exists() ? snap.val() : null);
+      });
+      unsubs.push(unsubscribe);
+    };
+
+    // Task completions
+    listen(`cm-c-isabella-${today}`, v => setComp(p => ({...p, isabella: v ? JSON.parse(v) : []})));
+    listen(`cm-c-jocelyn-${today}`,  v => setComp(p => ({...p, jocelyn:  v ? JSON.parse(v) : []})));
+
+    // Star balances
+    listen('cm-b-isabella', v => setBal(p => ({...p, isabella: v ? parseInt(v) : 0})));
+    listen('cm-b-jocelyn',  v => setBal(p => ({...p, jocelyn:  v ? parseInt(v) : 0})));
+
+    // Photo proofs
+    listen(`cm-proofs-isabella-${today}`, v => setProofs(p => ({...p, isabella: v ? JSON.parse(v) : {}})));
+    listen(`cm-proofs-jocelyn-${today}`,  v => setProofs(p => ({...p, jocelyn:  v ? JSON.parse(v) : {}})));
+
+    // Daily goals
+    listen(`cm-goal-isabella-${today}`, v => setGoals(p => ({...p, isabella: v || ''})));
+    listen(`cm-goal-jocelyn-${today}`,  v => setGoals(p => ({...p, jocelyn:  v || ''})));
+
+    // Reward requests
+    listen('cm-reward-requests', v => setRewardReqs(v ? JSON.parse(v) : []));
+
+    // Clean up all listeners when component unmounts
+    return () => unsubs.forEach(fn => fn());
+  }, []);
 
   const saveConfig = async (c) => { setConfig(c); await S.set('cm-config', JSON.stringify(c)); };
 
   // Toggle requiresProof on a single task
   const toggleProofRequired = (user, taskId) => {
     const updated = config.tasks[user].map(t => t.id === taskId ? { ...t, requiresProof: !t.requiresProof } : t);
+    saveConfig({ ...config, tasks: { ...config.tasks, [user]: updated } });
+  };
+
+  // Move a task up or down within its time-of-day group
+  const reorderTask = (user, taskId, direction) => {
+    const tasks = config.tasks[user];
+    const task  = tasks.find(t => t.id === taskId);
+    const group = task?.timeOfDay || 'general';
+    const groupTasks = tasks.filter(t => (t.timeOfDay || 'general') === group);
+    const groupIdx   = groupTasks.findIndex(t => t.id === taskId);
+    if (direction === 'up'   && groupIdx === 0) return;
+    if (direction === 'down' && groupIdx === groupTasks.length - 1) return;
+    const neighborTask = groupTasks[direction === 'up' ? groupIdx - 1 : groupIdx + 1];
+    const newTasks = [...tasks];
+    const i = newTasks.findIndex(t => t.id === taskId);
+    const j = newTasks.findIndex(t => t.id === neighborTask.id);
+    [newTasks[i], newTasks[j]] = [newTasks[j], newTasks[i]];
+    saveConfig({ ...config, tasks: { ...config.tasks, [user]: newTasks } });
+  };
+
+  // Edit the star value on an existing task
+  const updateTaskStars = (user, taskId, stars) => {
+    const updated = config.tasks[user].map(t => t.id === taskId ? { ...t, minutes: Math.max(1, stars) } : t);
     saveConfig({ ...config, tasks: { ...config.tasks, [user]: updated } });
   };
 
@@ -312,7 +360,7 @@ export default function App() {
 
   if (view==='landing')   return <Landing onSelect={t=>{setPinTarget(t);setView('pin');}}/>;
   if (view==='pin')       return <PinScreen target={pinTarget} config={config} onSuccess={()=>setView(pinTarget)} onBack={()=>setView('landing')}/>;
-  if (view==='parent')    return <ParentView config={config} saveConfig={saveConfig} comp={comp} bal={bal} proofs={proofs} goals={goals} rewards={rewards} rewardReqs={rewardReqs} redeem={redeem} approveProof={approveProof} rejectProof={rejectProof} toggleProofRequired={toggleProofRequired} saveRewards={saveRewards} approveRewardReq={approveRewardReq} denyRewardReq={denyRewardReq} logout={()=>setView('landing')}/>;
+  if (view==='parent')    return <ParentView config={config} saveConfig={saveConfig} comp={comp} bal={bal} proofs={proofs} goals={goals} rewards={rewards} rewardReqs={rewardReqs} redeem={redeem} approveProof={approveProof} rejectProof={rejectProof} toggleProofRequired={toggleProofRequired} reorderTask={reorderTask} updateTaskStars={updateTaskStars} saveRewards={saveRewards} approveRewardReq={approveRewardReq} denyRewardReq={denyRewardReq} logout={()=>setView('landing')}/>;
   if (view==='isabella')  return <KidView user="isabella" theme="kawaii" tasks={config.tasks.isabella} comp={comp.isabella} proofs={proofs.isabella} goal={goals.isabella} rewards={rewards} rewardReqs={rewardReqs.filter(r=>r.user==='isabella')} bal={bal.isabella} onToggle={id=>toggleTask('isabella',id)} onComplete={id=>completeTask('isabella',id)} onSubmitProof={(id,p)=>submitProof('isabella',id,p)} onSetGoal={g=>submitGoal('isabella',g)} onRequestReward={r=>requestReward('isabella',r)} logout={()=>setView('landing')}/>;
   if (view==='jocelyn')   return <KidView user="jocelyn"  theme="spidey" tasks={config.tasks.jocelyn}  comp={comp.jocelyn}  proofs={proofs.jocelyn}  goal={goals.jocelyn}  rewards={rewards} rewardReqs={rewardReqs.filter(r=>r.user==='jocelyn')}  bal={bal.jocelyn}  onToggle={id=>toggleTask('jocelyn',id)}  onComplete={id=>completeTask('jocelyn',id)}  onSubmitProof={(id,p)=>submitProof('jocelyn',id,p)}  onSetGoal={g=>submitGoal('jocelyn',g)}  onRequestReward={r=>requestReward('jocelyn',r)}  logout={()=>setView('landing')}/>;
   return null;
@@ -408,7 +456,7 @@ function PinScreen({target,config,onSuccess,onBack}) {
 /* ══════════════════════════════════════════
    PARENT DASHBOARD
 ══════════════════════════════════════════ */
-function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,redeem,approveProof,rejectProof,toggleProofRequired,saveRewards,approveRewardReq,denyRewardReq,logout}) {
+function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,redeem,approveProof,rejectProof,toggleProofRequired,reorderTask,updateTaskStars,saveRewards,approveRewardReq,denyRewardReq,logout}) {
   const [tab,setTab]=useState('overview');
   const [addFor,setAddFor]=useState(null);
   const [newTask,setNewTask]=useState({title:'',emoji:'⭐',recurring:true,minutes:15,requiresProof:false,timeOfDay:'morning'});
@@ -467,7 +515,7 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,
         {tab==='store'&&<ManageRewards rewards={rewards} saveRewards={saveRewards}/>}
 
         {(tab==='isabella'||tab==='jocelyn')&&(
-          <ParentTaskTab user={tab} tasks={config.tasks[tab]} comp={comp[tab]} proofs={proofs[tab]||{}} onAdd={()=>setAddFor(tab)} onDel={id=>delTask(tab,id)} onToggleProof={id=>toggleProofRequired(tab,id)} addFor={addFor} newTask={newTask} setNewTask={setNewTask} showEmoji={showEmoji} setShowEmoji={setShowEmoji} onConfirm={()=>addTask(tab)} onCancel={()=>{setAddFor(null);setShowEmoji(false);}}/>
+          <ParentTaskTab user={tab} tasks={config.tasks[tab]} comp={comp[tab]} proofs={proofs[tab]||{}} onAdd={()=>setAddFor(tab)} onDel={id=>delTask(tab,id)} onToggleProof={id=>toggleProofRequired(tab,id)} onReorder={(id,dir)=>reorderTask(tab,id,dir)} onUpdateStars={(id,s)=>updateTaskStars(tab,id,s)} addFor={addFor} newTask={newTask} setNewTask={setNewTask} showEmoji={showEmoji} setShowEmoji={setShowEmoji} onConfirm={()=>addTask(tab)} onCancel={()=>{setAddFor(null);setShowEmoji(false);}}/>
         )}
 
         {tab==='screentime'&&<>
@@ -602,10 +650,9 @@ function ProofInbox({proofs,config,onApprove,onReject}) {
   );
 }
 
-function ParentTaskTab({user,tasks,comp,proofs,onAdd,onDel,onToggleProof,addFor,newTask,setNewTask,showEmoji,setShowEmoji,onConfirm,onCancel}) {
+function ParentTaskTab({user,tasks,comp,proofs,onAdd,onDel,onToggleProof,onReorder,onUpdateStars,addFor,newTask,setNewTask,showEmoji,setShowEmoji,onConfirm,onCancel}) {
   const color=user==='isabella'?'#f107a3':'#e91e63';
   const name=user==='isabella'?'🌸 Isabella':'🕷️ Jossy';
-  // group by timeOfDay
   const groups={};
   tasks.forEach(t=>{ const g=t.timeOfDay||'general'; if(!groups[g])groups[g]=[]; groups[g].push(t); });
   const groupOrder=['morning','midday','afternoon','evening','general'];
@@ -643,7 +690,7 @@ function ParentTaskTab({user,tasks,comp,proofs,onAdd,onDel,onToggleProof,addFor,
             </div>
           </div>
           <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}>
-            <span style={{color:'rgba(255,255,255,0.55)',fontSize:13}}>⏱ Screen time minutes:</span>
+            <span style={{color:'rgba(255,255,255,0.55)',fontSize:13}}>🌟 Stars to earn:</span>
             <input type="number" value={newTask.minutes} onChange={e=>setNewTask(p=>({...p,minutes:parseInt(e.target.value)||0}))} style={{width:64,background:'rgba(255,255,255,0.07)',border:'1px solid rgba(255,255,255,0.13)',borderRadius:8,padding:'6px 10px',color:'white',fontSize:14,fontFamily:'inherit',outline:'none'}}/>
           </div>
           <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}>
@@ -672,29 +719,14 @@ function ParentTaskTab({user,tasks,comp,proofs,onAdd,onDel,onToggleProof,addFor,
               <span style={{fontWeight:700,fontSize:14,color:meta.color}}>{meta.label}</span>
               <span style={{color:'rgba(255,255,255,0.3)',fontSize:12}}>({grpTasks.length})</span>
             </div>
-            {grpTasks.map(task=>{
+            {grpTasks.map((task, grpIdx)=>{
               const done=comp.includes(task.id);
               const pending=!!proofs[task.id];
+              const isFirst=grpIdx===0;
+              const isLast=grpIdx===grpTasks.length-1;
               return(
-                <div key={task.id} style={{display:'flex',alignItems:'center',gap:10,background:done?'rgba(74,222,128,0.07)':pending?'rgba(251,191,36,0.07)':'rgba(255,255,255,0.03)',border:`1px solid ${done?'rgba(74,222,128,0.2)':pending?'rgba(251,191,36,0.2)':'rgba(255,255,255,0.06)'}`,borderRadius:12,padding:'10px 14px',marginBottom:6}}>
-                  <div style={{fontSize:20}}>{task.emoji}</div>
-                  <div style={{flex:1,minWidth:0}}>
-                    <div style={{fontWeight:600,fontSize:13,textDecoration:done?'line-through':'none',color:done?'rgba(255,255,255,0.3)':'white',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{task.title}</div>
-                    <div style={{color:'rgba(255,255,255,0.3)',fontSize:11,marginTop:1}}>
-                      {task.isMantras&&'📖 Mantras · '}
-                      {task.isGoal&&'🎯 Goal · '}
-                      {task.isGoalReview&&'🌟 Goal Review · '}
-                      ⏱ {task.minutes}m
-                      {done&&' · ✅'}
-                      {pending&&<span style={{color:'#fbbf24'}}> · 📸 pending</span>}
-                    </div>
-                  </div>
-                  {/* Proof toggle button */}
-                  <button onClick={()=>onToggleProof(task.id)} title={task.requiresProof?'Photo proof ON — click to turn off':'No proof required — click to require photo'} style={{background:task.requiresProof?`${color}25`:'rgba(255,255,255,0.06)',border:`1px solid ${task.requiresProof?color:'rgba(255,255,255,0.15)'}`,borderRadius:8,padding:'4px 8px',color:task.requiresProof?color:'rgba(255,255,255,0.3)',cursor:'pointer',fontSize:14,flexShrink:0}}>
-                    📷
-                  </button>
-                  <button onClick={()=>onDel(task.id)} style={{background:'rgba(239,68,68,0.1)',border:'1px solid rgba(239,68,68,0.2)',borderRadius:8,padding:'4px 8px',color:'#f87171',cursor:'pointer',fontSize:12,fontFamily:'inherit',flexShrink:0}}>✕</button>
-                </div>
+                <TaskRow key={task.id} task={task} done={done} pending={pending} isFirst={isFirst} isLast={isLast} color={color}
+                  onReorder={onReorder} onToggleProof={onToggleProof} onDel={onDel} onUpdateStars={onUpdateStars}/>
               );
             })}
           </div>
@@ -704,7 +736,78 @@ function ParentTaskTab({user,tasks,comp,proofs,onAdd,onDel,onToggleProof,addFor,
   );
 }
 
-function Toggle({on,color,onChange}) {
+function TaskRow({task,done,pending,isFirst,isLast,color,onReorder,onToggleProof,onDel,onUpdateStars}) {
+  const [editingStars, setEditingStars] = useState(false);
+  const [starsVal,     setStarsVal]     = useState(task.minutes);
+
+  const saveStars = () => {
+    setEditingStars(false);
+    const val = Math.max(1, parseInt(starsVal) || task.minutes);
+    setStarsVal(val);
+    if (val !== task.minutes) onUpdateStars(task.id, val);
+  };
+
+  // keep local val in sync if task.minutes changes externally
+  useEffect(() => { setStarsVal(task.minutes); }, [task.minutes]);
+
+  return(
+    <div style={{display:'flex',alignItems:'center',gap:8,background:done?'rgba(74,222,128,0.07)':pending?'rgba(251,191,36,0.07)':'rgba(255,255,255,0.03)',border:`1px solid ${done?'rgba(74,222,128,0.2)':pending?'rgba(251,191,36,0.2)':'rgba(255,255,255,0.06)'}`,borderRadius:12,padding:'10px 12px',marginBottom:6}}>
+
+      {/* ▲▼ reorder */}
+      <div style={{display:'flex',flexDirection:'column',gap:2,flexShrink:0}}>
+        <button onClick={()=>onReorder(task.id,'up')} disabled={isFirst}
+          style={{background:'rgba(255,255,255,0.07)',border:'1px solid rgba(255,255,255,0.12)',borderRadius:6,width:22,height:22,color:isFirst?'rgba(255,255,255,0.15)':'rgba(255,255,255,0.6)',cursor:isFirst?'default':'pointer',fontSize:11,padding:0,display:'flex',alignItems:'center',justifyContent:'center'}}>▲</button>
+        <button onClick={()=>onReorder(task.id,'down')} disabled={isLast}
+          style={{background:'rgba(255,255,255,0.07)',border:'1px solid rgba(255,255,255,0.12)',borderRadius:6,width:22,height:22,color:isLast?'rgba(255,255,255,0.15)':'rgba(255,255,255,0.6)',cursor:isLast?'default':'pointer',fontSize:11,padding:0,display:'flex',alignItems:'center',justifyContent:'center'}}>▼</button>
+      </div>
+
+      {/* Emoji */}
+      <div style={{fontSize:18,flexShrink:0}}>{task.emoji}</div>
+
+      {/* Title + editable stars */}
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{fontWeight:600,fontSize:13,textDecoration:done?'line-through':'none',color:done?'rgba(255,255,255,0.3)':'white',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{task.title}</div>
+        <div style={{display:'flex',alignItems:'center',gap:6,marginTop:2}}>
+          <span style={{color:'rgba(255,255,255,0.3)',fontSize:11}}>
+            {task.isMantras&&'📖 · '}{task.isGoal&&'🎯 · '}
+          </span>
+          {/* Inline star editor */}
+          <div style={{display:'flex',alignItems:'center',gap:3}}>
+            <span style={{fontSize:11,color:'rgba(255,215,0,0.7)'}}>🌟</span>
+            {editingStars ? (
+              <input
+                autoFocus
+                type="number"
+                value={starsVal}
+                onChange={e=>setStarsVal(e.target.value)}
+                onBlur={saveStars}
+                onKeyDown={e=>{if(e.key==='Enter')saveStars();if(e.key==='Escape'){setEditingStars(false);setStarsVal(task.minutes);}}}
+                style={{width:46,background:'rgba(255,215,0,0.15)',border:'1px solid rgba(255,215,0,0.5)',borderRadius:6,padding:'1px 6px',color:'#ffd700',fontSize:12,fontFamily:'inherit',outline:'none',textAlign:'center'}}
+              />
+            ) : (
+              <button onClick={()=>setEditingStars(true)} title="Click to edit stars"
+                style={{background:'rgba(255,215,0,0.1)',border:'1px solid rgba(255,215,0,0.25)',borderRadius:6,padding:'1px 8px',color:'rgba(255,215,0,0.8)',cursor:'pointer',fontSize:12,fontFamily:'inherit'}}>
+                {task.minutes} ✏️
+              </button>
+            )}
+          </div>
+          {done&&<span style={{color:'rgba(74,222,128,0.6)',fontSize:11}}>· ✅</span>}
+          {pending&&<span style={{color:'#fbbf24',fontSize:11}}>· 📸</span>}
+        </div>
+      </div>
+
+      {/* 📷 proof toggle */}
+      <button onClick={()=>onToggleProof(task.id)} title={task.requiresProof?'Photo proof ON — tap to turn off':'Tap to require photo proof'}
+        style={{background:task.requiresProof?`${color}25`:'rgba(255,255,255,0.06)',border:`1px solid ${task.requiresProof?color:'rgba(255,255,255,0.15)'}`,borderRadius:8,padding:'4px 7px',color:task.requiresProof?color:'rgba(255,255,255,0.3)',cursor:'pointer',fontSize:13,flexShrink:0}}>📷</button>
+
+      {/* ✕ delete */}
+      <button onClick={()=>onDel(task.id)}
+        style={{background:'rgba(239,68,68,0.1)',border:'1px solid rgba(239,68,68,0.2)',borderRadius:8,padding:'4px 8px',color:'#f87171',cursor:'pointer',fontSize:12,fontFamily:'inherit',flexShrink:0}}>✕</button>
+    </div>
+  );
+}
+
+
   return <div onClick={onChange} style={{width:44,height:24,background:on?color:'rgba(255,255,255,0.15)',borderRadius:100,cursor:'pointer',position:'relative',transition:'background 0.2s',flexShrink:0}}><div style={{position:'absolute',top:2,left:on?22:2,width:20,height:20,background:'white',borderRadius:'50%',transition:'left 0.2s',boxShadow:'0 1px 4px rgba(0,0,0,0.3)'}}/></div>;
 }
 
