@@ -5,7 +5,7 @@ import { getDatabase, ref, set, get, onValue } from "firebase/database";
 /* ══════════════════════════════════════════
    VERSION
 ══════════════════════════════════════════ */
-const VERSION = 'v11.1';
+const VERSION = 'v11.5';
 
 /* ══════════════════════════════════════════
    FIREBASE
@@ -1407,30 +1407,6 @@ function ManageRewards({rewards,saveRewards}) {
           <button onClick={()=>del(r.id)} style={{background:'rgba(239,68,68,0.1)',border:'1px solid rgba(239,68,68,0.2)',borderRadius:8,padding:'6px 10px',color:'#f87171',cursor:'pointer',fontSize:12,fontFamily:'inherit'}}>✕</button>
         </div>
       ))}
-      {/* Recent decisions from parents */}
-      {(() => {
-        const resolved = rewardReqs.filter(r => r.status && r.status !== 'pending').slice(0,5);
-        if (resolved.length === 0) return null;
-        return (
-          <div style={{marginTop:24}}>
-            <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:800,fontSize:14,color:'rgba(255,255,255,0.5)',marginBottom:12,letterSpacing:0.5}}>📬 RECENT DECISIONS</div>
-            {resolved.map(r => (
-              <div key={r.id} style={{background: r.status==='approved'?'rgba(74,222,128,0.08)':'rgba(239,68,68,0.08)', border:`1px solid ${r.status==='approved'?'rgba(74,222,128,0.25)':'rgba(239,68,68,0.25)'}`, borderRadius:14,padding:'12px 14px',marginBottom:8}}>
-                <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:r.note?6:0}}>
-                  <span style={{fontSize:22}}>{r.rewardEmoji}</span>
-                  <div style={{flex:1}}>
-                    <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:700,fontSize:13,color:'white'}}>{r.rewardTitle}</div>
-                    <div style={{fontFamily:"'Nunito',sans-serif",fontSize:11,color:r.status==='approved'?'#4ade80':'#f87171',marginTop:1}}>
-                      {r.status==='approved'?'✅ Approved':'❌ Denied'} by {r.resolvedBy}
-                    </div>
-                  </div>
-                </div>
-                {r.note&&<div style={{fontFamily:"'Nunito',sans-serif",fontSize:12,color:'rgba(255,255,255,0.65)',fontStyle:'italic',background:'rgba(255,255,255,0.05)',borderRadius:8,padding:'6px 10px'}}>&ldquo;{r.note}&rdquo;</div>}
-              </div>
-            ))}
-          </div>
-        );
-      })()}
     </div>
   );
 }
@@ -1453,7 +1429,7 @@ function KidStore({rewards,rewardReqs,bal,isIsa,onRequest}) {
 
       {rewards.map(reward=>{
         const canAfford=bal>=reward.stars;
-        const alreadyRequested=rewardReqs.some(r=>r.rewardId===reward.id);
+        const alreadyRequested=rewardReqs.some(r=>r.rewardId===reward.id&&(!r.status||r.status==='pending'));
         const pct=Math.min(100,Math.round(bal/reward.stars*100));
         return(
           <div key={reward.id} style={{background:alreadyRequested?'rgba(99,179,237,0.1)':canAfford?`${accentColor}14`:'rgba(255,255,255,0.04)',border:`1.5px solid ${alreadyRequested?'rgba(99,179,237,0.35)':canAfford?`${accentColor}50`:'rgba(255,255,255,0.08)'}`,borderRadius:18,padding:'14px 16px',marginBottom:10,transition:'all 0.2s'}}>
@@ -1485,6 +1461,31 @@ function KidStore({rewards,rewardReqs,bal,isIsa,onRequest}) {
           </div>
         );
       })}
+
+      {/* Recent decisions from parents */}
+      {(()=>{
+        const resolved=rewardReqs.filter(r=>r.status&&r.status!=='pending').slice(0,5);
+        if(resolved.length===0)return null;
+        return(
+          <div style={{marginTop:24}}>
+            <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:800,fontSize:14,color:'rgba(255,255,255,0.5)',marginBottom:12,letterSpacing:0.5}}>📬 RECENT DECISIONS</div>
+            {resolved.map(r=>(
+              <div key={r.id} style={{background:r.status==='approved'?'rgba(74,222,128,0.08)':'rgba(239,68,68,0.08)',border:`1px solid ${r.status==='approved'?'rgba(74,222,128,0.25)':'rgba(239,68,68,0.25)'}`,borderRadius:14,padding:'12px 14px',marginBottom:8}}>
+                <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:r.note?6:0}}>
+                  <span style={{fontSize:22}}>{r.rewardEmoji}</span>
+                  <div style={{flex:1}}>
+                    <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:700,fontSize:13,color:'white'}}>{r.rewardTitle}</div>
+                    <div style={{fontFamily:"'Nunito',sans-serif",fontSize:11,color:r.status==='approved'?'#4ade80':'#f87171',marginTop:1}}>
+                      {r.status==='approved'?'✅ Approved':'❌ Denied'} by {r.resolvedBy}
+                    </div>
+                  </div>
+                </div>
+                {r.note&&<div style={{fontFamily:"'Nunito',sans-serif",fontSize:12,color:'rgba(255,255,255,0.65)',fontStyle:'italic',background:'rgba(255,255,255,0.05)',borderRadius:8,padding:'6px 10px'}}>&ldquo;{r.note}&rdquo;</div>}
+              </div>
+            ))}
+          </div>
+        );
+      })()}
     </div>
   );
 }
