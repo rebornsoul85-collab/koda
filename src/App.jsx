@@ -836,6 +836,7 @@ function TaskRow({task,done,pending,isFirst,isLast,color,onReorder,onToggleProof
 }
 
 
+function Toggle({on,color,onChange}) {
   return <div onClick={onChange} style={{width:44,height:24,background:on?color:'rgba(255,255,255,0.15)',borderRadius:100,cursor:'pointer',position:'relative',transition:'background 0.2s',flexShrink:0}}><div style={{position:'absolute',top:2,left:on?22:2,width:20,height:20,background:'white',borderRadius:'50%',transition:'left 0.2s',boxShadow:'0 1px 4px rgba(0,0,0,0.3)'}}/></div>;
 }
 
