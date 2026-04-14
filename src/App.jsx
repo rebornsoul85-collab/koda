@@ -1,40 +1,32 @@
 import { useState, useEffect } from "react";
-import { createClient } from "@supabase/supabase-js";
+import { initializeApp } from "firebase/app";
+import { getDatabase, ref, set, get } from "firebase/database";
 
 /* ─────────────────────────────────────────────
-   SUPABASE SETUP
-   These values come from your .env file.
-   Get them from: Supabase Dashboard → Project
-   Settings → API
+   FIREBASE SETUP
 ───────────────────────────────────────────── */
-const supabase = createClient(
-  import.meta.env.VITE_SUPABASE_URL,
-  import.meta.env.VITE_SUPABASE_ANON_KEY
-);
+const firebaseConfig = {
+  apiKey:            import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain:        import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  databaseURL:       import.meta.env.VITE_FIREBASE_DATABASE_URL,
+  projectId:         import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket:     import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId:             import.meta.env.VITE_FIREBASE_APP_ID,
+};
 
-/* ─────────────────────────────────────────────
-   STORAGE HELPERS  (Supabase)
-   Uses a simple key/value table called
-   "choremap_store". See README for the one-line
-   SQL to create it.
-───────────────────────────────────────────── */
+const firebaseApp = initializeApp(firebaseConfig);
+const db = getDatabase(firebaseApp);
+
 const S = {
   async get(k) {
     try {
-      const { data } = await supabase
-        .from("choremap_store")
-        .select("value")
-        .eq("key", k)
-        .maybeSingle();
-      return data?.value ?? null;
+      const snap = await get(ref(db, k));
+      return snap.exists() ? snap.val() : null;
     } catch { return null; }
   },
   async set(k, v) {
-    try {
-      await supabase
-        .from("choremap_store")
-        .upsert({ key: k, value: v }, { onConflict: "key" });
-    } catch {}
+    try { await set(ref(db, k), v); } catch {}
   },
 };
 
