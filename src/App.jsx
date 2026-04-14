@@ -5,7 +5,7 @@ import { getDatabase, ref, set, get, onValue } from "firebase/database";
 /* ══════════════════════════════════════════
    VERSION
 ══════════════════════════════════════════ */
-const VERSION = 'v10';
+const VERSION = 'v11';
 
 /* ══════════════════════════════════════════
    FIREBASE
@@ -126,7 +126,7 @@ const makeRoutine = (p) => [
 ];
 
 const DEFAULT = {
-  pins: { parent:'1234', isabella:'1111', jocelyn:'2222' },
+  pins: { mom:'1234', dad:'5678', isabella:'1111', jocelyn:'2222' },
   tasks: { isabella: makeRoutine('ib'), jocelyn: makeRoutine('jc') },
 };
 
@@ -170,9 +170,11 @@ export default function App() {
   const [goals,     setGoals]     = useState({ isabella:'', jocelyn:'' });
   const [rewards,   setRewards]   = useState(DEFAULT_REWARDS);
   const [rewardReqs,setRewardReqs]= useState([]);
-  const [toast,     setToast]     = useState('');
-  const [fbStatus,  setFbStatus]  = useState('checking'); // 'checking' | 'ok' | error string
-  const [loading,   setLoading]   = useState(true);
+  const [toast,        setToast]       = useState('');
+  const [fbStatus,     setFbStatus]    = useState('checking');
+  const [currentParent,setCurrentParent]=useState('');
+  const [activity,     setActivity]    = useState([]);
+  const [loading,      setLoading]     = useState(true);
 
   const showToast = (msg) => {
     setToast(msg);
@@ -192,12 +194,22 @@ export default function App() {
 
     // ── Load static config data once ──────────────────────────────
     const loadStatic = async () => {
-      const [rawCfg, rawRwds] = await Promise.all([
+      const [rawCfg, rawRwds, rawAct] = await Promise.all([
         S.get('cm-config'),
         S.get('cm-rewards'),
+        S.get('cm-activity'),
       ]);
-      setConfig(rawCfg ? JSON.parse(rawCfg) : DEFAULT);
+      let cfg = rawCfg ? JSON.parse(rawCfg) : DEFAULT;
+      // ── Migration: convert old 'parent' PIN to mom + dad ──
+      if (cfg.pins.parent && !cfg.pins.mom) {
+        cfg.pins.mom = cfg.pins.parent;
+        cfg.pins.dad = '5678';
+        delete cfg.pins.parent;
+        await S.set('cm-config', JSON.stringify(cfg));
+      }
+      setConfig(cfg);
       setRewards(rawRwds ? JSON.parse(rawRwds) : DEFAULT_REWARDS);
+      setActivity(rawAct ? JSON.parse(rawAct) : []);
       setLoading(false);
     };
     loadStatic();
@@ -246,6 +258,9 @@ export default function App() {
 
     // Reward requests
     listen('cm-reward-requests', v => setRewardReqs(v ? JSON.parse(v) : []));
+
+    // Activity log
+    listen('cm-activity', v => setActivity(v ? JSON.parse(v) : []));
 
     // Clean up all listeners when component unmounts
     return () => unsubs.forEach(fn => fn());
@@ -372,36 +387,48 @@ export default function App() {
 
   // Kid requests a reward
   const requestReward = async (user, reward) => {
-    const req = { id: uid(), user, rewardId: reward.id, rewardTitle: reward.title, rewardEmoji: reward.emoji, stars: reward.stars, requestedAt: new Date().toISOString() };
+    const req = { id: uid(), user, rewardId: reward.id, rewardTitle: reward.title, rewardEmoji: reward.emoji, stars: reward.stars, requestedAt: new Date().toISOString(), status: 'pending', note: '', resolvedBy: '', resolvedAt: '' };
     const updated = [...rewardReqs, req];
     setRewardReqs(updated);
     await S.set('cm-reward-requests', JSON.stringify(updated));
   };
 
-  // Parent approves reward request — deduct stars, remove request
-  const approveRewardReq = async (reqId) => {
+  // Parent approves reward — deduct stars, resolve request, log activity
+  const approveRewardReq = async (reqId, note) => {
     const req = rewardReqs.find(r => r.id === reqId);
     if (!req) return;
     const newBal = Math.max(0, bal[req.user] - req.stars);
     setBal(p => ({ ...p, [req.user]: newBal }));
     await S.set(`cm-b-${req.user}`, String(newBal));
-    const updated = rewardReqs.filter(r => r.id !== reqId);
-    setRewardReqs(updated);
-    await S.set('cm-reward-requests', JSON.stringify(updated));
+    const updatedReqs = rewardReqs.map(r => r.id === reqId
+      ? { ...r, status: 'approved', resolvedBy: currentParent, resolvedAt: new Date().toISOString(), note: note || '' }
+      : r);
+    setRewardReqs(updatedReqs);
+    await S.set('cm-reward-requests', JSON.stringify(updatedReqs));
+    const newActivity = [{ id: uid(), type: 'approved', by: currentParent, user: req.user, rewardTitle: req.rewardTitle, rewardEmoji: req.rewardEmoji, stars: req.stars, note: note || '', timestamp: new Date().toISOString() }, ...activity].slice(0, 50);
+    setActivity(newActivity);
+    await S.set('cm-activity', JSON.stringify(newActivity));
   };
 
-  // Parent denies — just remove request, no star deduction
-  const denyRewardReq = async (reqId) => {
-    const updated = rewardReqs.filter(r => r.id !== reqId);
-    setRewardReqs(updated);
-    await S.set('cm-reward-requests', JSON.stringify(updated));
+  // Parent denies reward — no star change, resolve request, log activity
+  const denyRewardReq = async (reqId, note) => {
+    const req = rewardReqs.find(r => r.id === reqId);
+    if (!req) return;
+    const updatedReqs = rewardReqs.map(r => r.id === reqId
+      ? { ...r, status: 'denied', resolvedBy: currentParent, resolvedAt: new Date().toISOString(), note }
+      : r);
+    setRewardReqs(updatedReqs);
+    await S.set('cm-reward-requests', JSON.stringify(updatedReqs));
+    const newActivity = [{ id: uid(), type: 'denied', by: currentParent, user: req.user, rewardTitle: req.rewardTitle, rewardEmoji: req.rewardEmoji, stars: req.stars, note, timestamp: new Date().toISOString() }, ...activity].slice(0, 50);
+    setActivity(newActivity);
+    await S.set('cm-activity', JSON.stringify(newActivity));
   };
 
   if (loading) return <div style={{minHeight:'100vh',background:'#0d0d2b',display:'flex',alignItems:'center',justifyContent:'center'}}><div style={{color:'white',fontFamily:'sans-serif',fontSize:20}}>🌟 Loading Koda…</div></div>;
 
   if (view==='landing')   return <Landing onSelect={t=>{setPinTarget(t);setView('pin');}}/>;
-  if (view==='pin')       return <PinScreen target={pinTarget} config={config} onSuccess={()=>setView(pinTarget)} onBack={()=>setView('landing')}/>;
-  if (view==='parent')    return <><ParentView config={config} saveConfig={saveConfig} comp={comp} bal={bal} proofs={proofs} goals={goals} rewards={rewards} rewardReqs={rewardReqs} redeem={redeem} approveProof={approveProof} rejectProof={rejectProof} toggleProofRequired={toggleProofRequired} reorderTask={reorderTask} updateTaskStars={updateTaskStars} saveRewards={saveRewards} approveRewardReq={approveRewardReq} denyRewardReq={denyRewardReq} fbStatus={fbStatus} toggleTask={toggleTask} logout={()=>setView('landing')}/>{toast&&<Toast msg={toast}/>}</>;
+  if (view==='pin')       return <PinScreen target={pinTarget} config={config} onSuccess={()=>{if(pinTarget==='mom'||pinTarget==='dad')setCurrentParent(pinTarget==='mom'?'Mom':'Dad');setView(pinTarget);}} onBack={()=>setView('landing')}/>;
+  if (view==='mom'||view==='dad') return <><ParentView config={config} saveConfig={saveConfig} comp={comp} bal={bal} proofs={proofs} goals={goals} rewards={rewards} rewardReqs={rewardReqs} activity={activity} redeem={redeem} approveProof={approveProof} rejectProof={rejectProof} toggleProofRequired={toggleProofRequired} reorderTask={reorderTask} updateTaskStars={updateTaskStars} saveRewards={saveRewards} approveRewardReq={approveRewardReq} denyRewardReq={denyRewardReq} fbStatus={fbStatus} toggleTask={toggleTask} parentName={currentParent} logout={()=>setView('landing')}/>{toast&&<Toast msg={toast}/>}</>;
   if (view==='isabella')  return <><KidView user="isabella" theme="kawaii" tasks={config.tasks.isabella} comp={comp.isabella} proofs={proofs.isabella} goal={goals.isabella} rewards={rewards} rewardReqs={rewardReqs.filter(r=>r.user==='isabella')} bal={bal.isabella} onToggle={id=>toggleTask('isabella',id)} onComplete={id=>completeTask('isabella',id)} onSubmitProof={(id,p)=>submitProof('isabella',id,p)} onSetGoal={g=>submitGoal('isabella',g)} onRequestReward={r=>requestReward('isabella',r)} logout={()=>setView('landing')}/>{toast&&<Toast msg={toast}/>}</>;
   if (view==='jocelyn')   return <><KidView user="jocelyn"  theme="spidey" tasks={config.tasks.jocelyn}  comp={comp.jocelyn}  proofs={proofs.jocelyn}  goal={goals.jocelyn}  rewards={rewards} rewardReqs={rewardReqs.filter(r=>r.user==='jocelyn')}  bal={bal.jocelyn}  onToggle={id=>toggleTask('jocelyn',id)}  onComplete={id=>completeTask('jocelyn',id)}  onSubmitProof={(id,p)=>submitProof('jocelyn',id,p)}  onSetGoal={g=>submitGoal('jocelyn',g)}  onRequestReward={r=>requestReward('jocelyn',r)}  logout={()=>setView('landing')}/>{toast&&<Toast msg={toast}/>}</>;
   return null;
@@ -420,12 +447,13 @@ function Landing({ onSelect }) {
         <p style={{color:'rgba(255,220,80,0.7)',fontSize:13,margin:0,letterSpacing:1}}>Do the thing. Earn the stars. ✨</p>
       </div>
       <div style={{width:'100%',maxWidth:380,position:'relative',zIndex:1}}>
-        <LandingCard emoji="👨‍👩‍👧‍👦" name="Parent" sub="Mission Control" bg="linear-gradient(135deg,#1e3a5f,#243b80)" border="rgba(99,179,237,0.35)" glow="rgba(59,130,246,0.25)" onClick={()=>onSelect('parent')}/>
+        <LandingCard emoji="👩" name="Mom" sub="Mission Control" bg="linear-gradient(135deg,#be185d,#db2777)" border="rgba(251,182,206,0.4)" glow="rgba(219,39,119,0.3)" onClick={()=>onSelect('mom')}/>
+        <LandingCard emoji="👨" name="Dad" sub="Mission Control" bg="linear-gradient(135deg,#1e3a5f,#243b80)" border="rgba(99,179,237,0.35)" glow="rgba(59,130,246,0.25)" onClick={()=>onSelect('dad')}/>
         <LandingCard emoji="🌸" name="Isabella" sub="✨ Your kawaii quests!" bg="linear-gradient(135deg,#7b2ff7,#f107a3)" border="rgba(255,182,213,0.5)" glow="rgba(241,7,163,0.3)" badge="アニメ" onClick={()=>onSelect('isabella')}/>
         <LandingCard emoji="🕷️" name="Jossy" sub="Your web of tasks awaits 💅" bg="linear-gradient(135deg,#8b0000,#e91e63)" border="rgba(255,100,150,0.4)" glow="rgba(220,0,50,0.3)" webDeco onClick={()=>onSelect('jocelyn')}/>
       </div>
       <div style={{marginTop:20,padding:'8px 18px',background:'rgba(255,255,255,0.05)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:10,color:'rgba(255,255,255,0.3)',fontSize:11,position:'relative',zIndex:1,textAlign:'center'}}>
-        🌟 Koda {VERSION} &nbsp;·&nbsp; Default PINs: Parent 1234 · Isabella 1111 · Jossy 2222
+        🌟 Koda {VERSION} &nbsp;·&nbsp; Mom 1234 · Dad 5678 · Isabella 1111 · Jossy 2222
       </div>
     </div>
   );
@@ -462,9 +490,9 @@ function PinScreen({target,config,onSuccess,onBack}) {
   const [digits,setDigits]=useState([]);
   const [err,setErr]=useState(false);
   const [shake,setShake]=useState(false);
-  const COLOR={parent:'#3b82f6',isabella:'#f107a3',jocelyn:'#e91e63'};
-  const NAME={parent:'Parent',isabella:'Isabella',jocelyn:'Jossy'};
-  const ICON={parent:'🔐',isabella:'🌸',jocelyn:'🕷️'};
+  const COLOR={mom:'#db2777',dad:'#3b82f6',isabella:'#f107a3',jocelyn:'#e91e63'};
+  const NAME={mom:'Mom',dad:'Dad',isabella:'Isabella',jocelyn:'Jossy'};
+  const ICON={mom:'👩',dad:'👨',isabella:'🌸',jocelyn:'🕷️'};
   const color=COLOR[target];
   const add=d=>{
     if(digits.length>=4)return;
@@ -497,16 +525,16 @@ function PinScreen({target,config,onSuccess,onBack}) {
 /* ══════════════════════════════════════════
    PARENT DASHBOARD
 ══════════════════════════════════════════ */
-function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,redeem,approveProof,rejectProof,toggleProofRequired,reorderTask,updateTaskStars,saveRewards,approveRewardReq,denyRewardReq,fbStatus,toggleTask,logout}) {
+function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,activity,redeem,approveProof,rejectProof,toggleProofRequired,reorderTask,updateTaskStars,saveRewards,approveRewardReq,denyRewardReq,fbStatus,toggleTask,parentName,logout}) {
   const [tab,setTab]=useState('overview');
   const [addFor,setAddFor]=useState(null);
   const [newTask,setNewTask]=useState({title:'',emoji:'⭐',recurring:true,minutes:15,requiresProof:false,timeOfDay:'morning'});
   const [showEmoji,setShowEmoji]=useState(false);
   const [redeemAmt,setRedeemAmt]=useState({isabella:'',jocelyn:''});
-  const [newPins,setNewPins]=useState({parent:'',isabella:'',jocelyn:''});
+  const [newPins,setNewPins]=useState({mom:'',dad:'',isabella:'',jocelyn:''});
   const [savedMsg,setSavedMsg]=useState('');
-  const pendingProofs=Object.keys(proofs.isabella||{}).length+Object.keys(proofs.jocelyn||{}).length;
-  const pendingRewards=rewardReqs.length;
+  const pendingProofs  = Object.keys(proofs.isabella||{}).length+Object.keys(proofs.jocelyn||{}).length;
+  const pendingRewards = rewardReqs.filter(r=>r.status==='pending').length;
 
   const addTask=user=>{
     if(!newTask.title.trim())return;
@@ -517,14 +545,15 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,
   const delTask=(user,id)=>saveConfig({...config,tasks:{...config.tasks,[user]:config.tasks[user].filter(t=>t.id!==id)}});
   const doRedeem=user=>{const m=parseInt(redeemAmt[user]);if(!m||m<=0)return;redeem(user,m);setRedeemAmt(p=>({...p,[user]:''}));};
   const savePins=()=>{
-    saveConfig({...config,pins:{parent:newPins.parent||config.pins.parent,isabella:newPins.isabella||config.pins.isabella,jocelyn:newPins.jocelyn||config.pins.jocelyn}});
-    setNewPins({parent:'',isabella:'',jocelyn:''});setSavedMsg('✅ PINs saved!');setTimeout(()=>setSavedMsg(''),2500);
+    saveConfig({...config,pins:{mom:newPins.mom||config.pins.mom,dad:newPins.dad||config.pins.dad,isabella:newPins.isabella||config.pins.isabella,jocelyn:newPins.jocelyn||config.pins.jocelyn}});
+    setNewPins({mom:'',dad:'',isabella:'',jocelyn:''});setSavedMsg('✅ PINs saved!');setTimeout(()=>setSavedMsg(''),2500);
   };
 
   const TABS=[
     {id:'overview',  label:'🏠', title:'Overview'},
-    {id:'proof',     label:'📸', title:'Proof',   badge:pendingProofs},
+    {id:'proof',     label:'📸', title:'Proof',    badge:pendingProofs},
     {id:'rewards',   label:'🎁', title:'Requests', badge:pendingRewards},
+    {id:'activity',  label:'📋', title:'Activity'},
     {id:'store',     label:'🛍️', title:'Rewards'},
     {id:'isabella',  label:'🌸', title:'Isabella'},
     {id:'jocelyn',   label:'🕷️', title:'Jossy'},
@@ -535,7 +564,7 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,
     <div style={{minHeight:'100vh',background:'#0a0f1e',fontFamily:"'Nunito',sans-serif",color:'white'}}>
       <div style={{background:'linear-gradient(135deg,#0f2a4a,#1a3a6e)',padding:'20px 20px 0',borderBottom:'1px solid rgba(99,179,237,0.2)'}}>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
-          <div><div style={{fontWeight:900,fontSize:22}}>🌟 Koda</div><div style={{color:'rgba(255,255,255,0.4)',fontSize:12}}>Parent · Mission Control · <span style={{color:'rgba(255,255,255,0.25)'}}>{VERSION}</span></div></div>
+          <div><div style={{fontWeight:900,fontSize:22}}>🌟 Koda</div><div style={{color:'rgba(255,255,255,0.4)',fontSize:12}}>{parentName} · Mission Control · <span style={{color:'rgba(255,255,255,0.25)'}}>{VERSION}</span></div></div>
           <div style={{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:4}}>
             <button onClick={logout} style={{background:'rgba(255,255,255,0.08)',border:'1px solid rgba(255,255,255,0.15)',borderRadius:10,padding:'6px 14px',color:'rgba(255,255,255,0.65)',cursor:'pointer',fontSize:13,fontFamily:'inherit'}}>Sign Out</button>
             <div style={{fontSize:11,color:fbStatus==='ok'?'#4ade80':fbStatus==='checking'?'rgba(255,255,255,0.4)':'#f87171'}}>
@@ -558,6 +587,7 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,
         {tab==='overview'&&<ParentOverview comp={comp} bal={bal} proofs={proofs} goals={goals} config={config} rewardReqs={rewardReqs} onShowProof={()=>setTab('proof')} onShowRewards={()=>setTab('rewards')}/>}
         {tab==='proof'&&<ProofInbox proofs={proofs} config={config} onApprove={approveProof} onReject={rejectProof}/>}
         {tab==='rewards'&&<RewardRequests rewardReqs={rewardReqs} bal={bal} onApprove={approveRewardReq} onDeny={denyRewardReq}/>}
+        {tab==='activity'&&<ActivityLog activity={activity}/>}
         {tab==='store'&&<ManageRewards rewards={rewards} saveRewards={saveRewards}/>}
 
         {(tab==='isabella'||tab==='jocelyn')&&(
@@ -588,10 +618,10 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,
         {tab==='settings'&&<>
           <h2 style={{fontWeight:800,fontSize:20,marginBottom:6}}>⚙️ Change PINs</h2>
           <p style={{color:'rgba(255,255,255,0.4)',fontSize:13,marginBottom:20}}>Leave blank to keep current PIN</p>
-          {[{key:'parent',label:'👨‍👩‍👧 Parent'},{key:'isabella',label:'🌸 Isabella'},{key:'jocelyn',label:'🕷️ Jossy'}].map(({key,label})=>(
+          {[{key:'mom',label:'👩 Mom'},{key:'dad',label:'👨 Dad'},{key:'isabella',label:'🌸 Isabella'},{key:'jocelyn',label:'🕷️ Jossy'}].map(({key,label})=>(
             <div key={key} style={{marginBottom:14}}>
               <label style={{display:'block',color:'rgba(255,255,255,0.55)',fontSize:13,marginBottom:6}}>{label} <span style={{color:'rgba(255,255,255,0.25)'}}>— current: {config.pins[key]}</span></label>
-              <input type="tel" maxLength={4} placeholder="New 4-digit PIN" value={newPins[key]} onChange={e=>setNewPins(p=>({...p,[key]:e.target.value.replace(/\D/g,'').slice(0,4)}))} style={{width:'100%',background:'rgba(255,255,255,0.06)',border:'1px solid rgba(255,255,255,0.13)',borderRadius:10,padding:'10px 14px',color:'white',fontSize:16,fontFamily:'inherit',outline:'none'}}/>
+              <input type="tel" maxLength={4} placeholder="New 4-digit PIN" value={newPins[key]||''} onChange={e=>setNewPins(p=>({...p,[key]:e.target.value.replace(/\D/g,'').slice(0,4)}))} style={{width:'100%',background:'rgba(255,255,255,0.06)',border:'1px solid rgba(255,255,255,0.13)',borderRadius:10,padding:'10px 14px',color:'white',fontSize:16,fontFamily:'inherit',outline:'none'}}/>
             </div>
           ))}
           <button onClick={savePins} style={{width:'100%',background:'#2563eb',border:'none',borderRadius:12,padding:12,color:'white',fontWeight:700,cursor:'pointer',fontSize:15,fontFamily:'inherit',marginTop:8}}>Save PINs</button>
@@ -604,7 +634,7 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,
 
 function ParentOverview({comp,bal,proofs,goals,config,rewardReqs,onShowProof,onShowRewards}) {
   const pendingProofs=Object.keys(proofs.isabella||{}).length+Object.keys(proofs.jocelyn||{}).length;
-  const pendingRewards=rewardReqs.length;
+  const pendingRewards=rewardReqs.filter(r=>r.status==='pending'||(r.status===undefined)).length;
   return(
     <>
       <h2 style={{fontWeight:800,fontSize:20,marginBottom:16}}>📊 Today&apos;s Overview</h2>
@@ -1208,24 +1238,35 @@ function SakuraDecor() {
    REWARD REQUESTS  (parent view)
 ══════════════════════════════════════════ */
 function RewardRequests({rewardReqs,bal,onApprove,onDeny}) {
-  if(rewardReqs.length===0) return(
+  const [active,setActive]=useState(null);
+  const [note,setNote]=useState('');
+  const pending=rewardReqs.filter(r=>r.status==='pending'||(r.status===undefined));
+  const startAction=(id,action)=>{setActive({id,action});setNote('');};
+  const cancel=()=>{setActive(null);setNote('');};
+  const confirm=()=>{
+    if(active.action==='deny'&&!note.trim())return;
+    if(active.action==='approve')onApprove(active.id,note.trim());
+    else onDeny(active.id,note.trim());
+    setActive(null);setNote('');
+  };
+  if(pending.length===0)return(
     <div style={{textAlign:'center',padding:'60px 20px'}}>
       <div style={{fontSize:48,marginBottom:12}}>🎁</div>
-      <div style={{color:'rgba(255,255,255,0.5)',fontSize:16,fontWeight:600}}>No reward requests!</div>
-      <div style={{color:'rgba(255,255,255,0.3)',fontSize:13,marginTop:6}}>When the girls request a reward, it&apos;ll show up here.</div>
+      <div style={{color:'rgba(255,255,255,0.5)',fontSize:16,fontWeight:600}}>No pending requests!</div>
+      <div style={{color:'rgba(255,255,255,0.3)',fontSize:13,marginTop:6}}>Check the 📋 Activity tab for past decisions.</div>
     </div>
   );
   return(
     <div>
       <h2 style={{fontWeight:800,fontSize:20,marginBottom:6}}>🎁 Reward Requests</h2>
-      <p style={{color:'rgba(255,255,255,0.4)',fontSize:13,marginBottom:20}}>{rewardReqs.length} request{rewardReqs.length>1?'s':''} waiting</p>
-      {rewardReqs.map(req=>{
+      <p style={{color:'rgba(255,255,255,0.4)',fontSize:13,marginBottom:20}}>{pending.length} request{pending.length>1?'s':''} waiting</p>
+      {pending.map(req=>{
         const isIsa=req.user==='isabella';
         const color=isIsa?'#f107a3':'#e91e63';
         const name=isIsa?'🌸 Isabella':'🕷️ Jossy';
         const userBal=bal[req.user];
-        const canAfford=userBal>=req.stars;
         const time=new Date(req.requestedAt).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
+        const isActiveReq=active?.id===req.id;
         return(
           <div key={req.id} style={{background:'rgba(255,255,255,0.04)',border:`1px solid ${color}40`,borderRadius:18,padding:20,marginBottom:14}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
@@ -1236,19 +1277,83 @@ function RewardRequests({rewardReqs,bal,onApprove,onDeny}) {
               <span style={{fontSize:32}}>{req.rewardEmoji}</span>
               <div style={{flex:1}}>
                 <div style={{fontWeight:700,fontSize:16,color:'white'}}>{req.rewardTitle}</div>
-                <div style={{fontSize:13,color:'rgba(255,255,255,0.5)',marginTop:2}}>Costs: 🌟 {req.stars} stars</div>
+                <div style={{fontSize:13,color:'rgba(255,255,255,0.5)',marginTop:2}}>🌟 {req.stars} stars · Balance: <span style={{color:'#ffd700',fontWeight:700}}>{userBal} stars</span></div>
               </div>
             </div>
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
-              <span style={{fontSize:13,color:'rgba(255,255,255,0.5)'}}>
-                Current balance: <span style={{color:'#ffd700',fontWeight:700}}>🌟 {userBal} stars</span>
-              </span>
-              {!canAfford&&<span style={{fontSize:12,color:'#f87171',fontWeight:600}}>⚠️ Not enough stars</span>}
+            {isActiveReq?(
+              <div>
+                <div style={{color:'rgba(255,255,255,0.6)',fontSize:13,marginBottom:6}}>
+                  {active.action==='deny'?'❌ Reason for denying (required — she will see this):':'✅ Leave a note for her (optional):'}
+                </div>
+                <textarea autoFocus placeholder={active.action==='deny'?'e.g. "Finish homework first" or "Ask again on Friday"':'e.g. "Great job this week! Enjoy!" (or leave blank)'} value={note} onChange={e=>setNote(e.target.value)} rows={3} style={{width:'100%',background:'rgba(255,255,255,0.07)',border:`1px solid ${active.action==='deny'?'rgba(239,68,68,0.4)':'rgba(74,222,128,0.4)'}`,borderRadius:12,padding:'10px 14px',color:'white',fontSize:14,fontFamily:'inherit',outline:'none',resize:'none',marginBottom:10}}/>
+                <div style={{display:'flex',gap:8}}>
+                  <button onClick={confirm} disabled={active.action==='deny'&&!note.trim()} style={{flex:1,background:active.action==='approve'?'rgba(74,222,128,0.15)':'rgba(239,68,68,0.15)',border:`1.5px solid ${active.action==='approve'?'rgba(74,222,128,0.4)':'rgba(239,68,68,0.4)'}`,borderRadius:12,padding:'10px',color:active.action==='approve'?'#4ade80':'#f87171',fontWeight:700,cursor:active.action==='deny'&&!note.trim()?'default':'pointer',fontSize:14,fontFamily:'inherit',opacity:active.action==='deny'&&!note.trim()?0.4:1}}>
+                    {active.action==='approve'?'✅ Confirm Approval':'❌ Confirm Denial'}
+                  </button>
+                  <button onClick={cancel} style={{background:'rgba(255,255,255,0.08)',border:'1px solid rgba(255,255,255,0.15)',borderRadius:12,padding:'10px 16px',color:'rgba(255,255,255,0.6)',cursor:'pointer',fontFamily:'inherit'}}>Cancel</button>
+                </div>
+              </div>
+            ):(
+              <div style={{display:'flex',gap:10}}>
+                <button onClick={()=>startAction(req.id,'approve')} style={{flex:1,background:'rgba(74,222,128,0.15)',border:'1.5px solid rgba(74,222,128,0.4)',borderRadius:12,padding:'10px',color:'#4ade80',fontWeight:700,cursor:'pointer',fontSize:14,fontFamily:'inherit'}}>✅ Approve</button>
+                <button onClick={()=>startAction(req.id,'deny')}    style={{flex:1,background:'rgba(239,68,68,0.12)',border:'1.5px solid rgba(239,68,68,0.3)',borderRadius:12,padding:'10px',color:'#f87171',fontWeight:700,cursor:'pointer',fontSize:14,fontFamily:'inherit'}}>❌ Deny</button>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════
+   ACTIVITY LOG  (parent view)
+══════════════════════════════════════════ */
+function ActivityLog({activity}) {
+  if(!activity||activity.length===0) return(
+    <div style={{textAlign:'center',padding:'60px 20px'}}>
+      <div style={{fontSize:48,marginBottom:12}}>📋</div>
+      <div style={{color:'rgba(255,255,255,0.5)',fontSize:16,fontWeight:600}}>No activity yet!</div>
+      <div style={{color:'rgba(255,255,255,0.3)',fontSize:13,marginTop:6}}>Approved and denied rewards will show up here.</div>
+    </div>
+  );
+  const timeAgo=(ts)=>{
+    const mins=Math.round((Date.now()-new Date(ts))/60000);
+    if(mins<1)return'just now';if(mins<60)return`${mins}m ago`;
+    const hrs=Math.round(mins/60);if(hrs<24)return`${hrs}h ago`;
+    return`${Math.round(hrs/24)}d ago`;
+  };
+  return(
+    <div>
+      <h2 style={{fontWeight:800,fontSize:20,marginBottom:6}}>📋 Activity Log</h2>
+      <p style={{color:'rgba(255,255,255,0.4)',fontSize:13,marginBottom:20}}>Recent reward decisions</p>
+      {activity.slice(0,30).map(item=>{
+        const isApproved=item.type==='approved';
+        const isIsa=item.user==='isabella';
+        const userColor=isIsa?'#f107a3':'#e91e63';
+        const userName=isIsa?'Isabella':'Jossy';
+        return(
+          <div key={item.id} style={{background:'rgba(255,255,255,0.04)',border:`1px solid ${isApproved?'rgba(74,222,128,0.2)':'rgba(239,68,68,0.2)'}`,borderRadius:16,padding:'14px 16px',marginBottom:10}}>
+            <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:item.note?8:0}}>
+              <span style={{fontSize:24}}>{item.rewardEmoji}</span>
+              <div style={{flex:1}}>
+                <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+                  <span style={{fontWeight:700,color:isApproved?'#4ade80':'#f87171',fontSize:14}}>{isApproved?'✅ Approved':'❌ Denied'}</span>
+                  <span style={{color:'rgba(255,255,255,0.5)',fontSize:13}}>·</span>
+                  <span style={{fontWeight:600,color:'white',fontSize:14}}>{item.rewardTitle}</span>
+                  <span style={{color:'rgba(255,255,255,0.5)',fontSize:13}}>for</span>
+                  <span style={{color:userColor,fontWeight:600,fontSize:13}}>{userName}</span>
+                </div>
+                <div style={{color:'rgba(255,255,255,0.35)',fontSize:11,marginTop:2}}>
+                  by {item.by} · {timeAgo(item.timestamp)} · 🌟 {item.stars} stars
+                </div>
+              </div>
             </div>
-            <div style={{display:'flex',gap:10}}>
-              <button onClick={()=>onApprove(req.id)} style={{flex:1,background:'rgba(74,222,128,0.15)',border:'1.5px solid rgba(74,222,128,0.4)',borderRadius:12,padding:'10px',color:'#4ade80',fontWeight:700,cursor:'pointer',fontSize:14,fontFamily:'inherit'}}>✅ Approve</button>
-              <button onClick={()=>onDeny(req.id)} style={{flex:1,background:'rgba(239,68,68,0.12)',border:'1.5px solid rgba(239,68,68,0.3)',borderRadius:12,padding:'10px',color:'#f87171',fontWeight:700,cursor:'pointer',fontSize:14,fontFamily:'inherit'}}>❌ Deny</button>
-            </div>
+            {item.note&&(
+              <div style={{background:'rgba(255,255,255,0.05)',borderRadius:10,padding:'8px 12px',fontSize:13,color:'rgba(255,255,255,0.7)',fontStyle:'italic'}}>
+                &ldquo;{item.note}&rdquo;
+              </div>
+            )}
           </div>
         );
       })}
@@ -1302,13 +1407,33 @@ function ManageRewards({rewards,saveRewards}) {
           <button onClick={()=>del(r.id)} style={{background:'rgba(239,68,68,0.1)',border:'1px solid rgba(239,68,68,0.2)',borderRadius:8,padding:'6px 10px',color:'#f87171',cursor:'pointer',fontSize:12,fontFamily:'inherit'}}>✕</button>
         </div>
       ))}
+      {/* Recent decisions from parents */}
+      {(() => {
+        const resolved = rewardReqs.filter(r => r.status && r.status !== 'pending').slice(0,5);
+        if (resolved.length === 0) return null;
+        return (
+          <div style={{marginTop:24}}>
+            <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:800,fontSize:14,color:'rgba(255,255,255,0.5)',marginBottom:12,letterSpacing:0.5}}>📬 RECENT DECISIONS</div>
+            {resolved.map(r => (
+              <div key={r.id} style={{background: r.status==='approved'?'rgba(74,222,128,0.08)':'rgba(239,68,68,0.08)', border:`1px solid ${r.status==='approved'?'rgba(74,222,128,0.25)':'rgba(239,68,68,0.25)'}`, borderRadius:14,padding:'12px 14px',marginBottom:8}}>
+                <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:r.note?6:0}}>
+                  <span style={{fontSize:22}}>{r.rewardEmoji}</span>
+                  <div style={{flex:1}}>
+                    <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:700,fontSize:13,color:'white'}}>{r.rewardTitle}</div>
+                    <div style={{fontFamily:"'Nunito',sans-serif",fontSize:11,color:r.status==='approved'?'#4ade80':'#f87171',marginTop:1}}>
+                      {r.status==='approved'?'✅ Approved':'❌ Denied'} by {r.resolvedBy}
+                    </div>
+                  </div>
+                </div>
+                {r.note&&<div style={{fontFamily:"'Nunito',sans-serif",fontSize:12,color:'rgba(255,255,255,0.65)',fontStyle:'italic',background:'rgba(255,255,255,0.05)',borderRadius:8,padding:'6px 10px'}}>&ldquo;{r.note}&rdquo;</div>}
+              </div>
+            ))}
+          </div>
+        );
+      })()}
     </div>
   );
 }
-
-/* ══════════════════════════════════════════
-   KID REWARD STORE
-══════════════════════════════════════════ */
 function KidStore({rewards,rewardReqs,bal,isIsa,onRequest}) {
   const accentColor=isIsa?'#f107a3':'#e91e63';
   const doneGradient=isIsa?'linear-gradient(135deg,#f107a3,#7b2ff7)':'linear-gradient(135deg,#8b0000,#e91e63)';
