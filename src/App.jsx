@@ -5,7 +5,7 @@ import { getDatabase, ref, set, get, onValue } from "firebase/database";
 /* ══════════════════════════════════════════
    VERSION
 ══════════════════════════════════════════ */
-const VERSION = 'v8';
+const VERSION = 'v9';
 
 /* ══════════════════════════════════════════
    FIREBASE
@@ -33,19 +33,19 @@ const S = {
 
 /* ══════════════════════════════════════════
    IMAGE COMPRESSION
-   600px max, 50% quality — keeps photos
-   well under Firebase's write limits
+   1000px max, 75% quality — sharp enough
+   to read clearly while staying lean
 ══════════════════════════════════════════ */
 const compressImage = (file) => new Promise((resolve, reject) => {
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d');
   const img = new Image();
   img.onload = () => {
-    const ratio = Math.min(600/img.width, 600/img.height, 1);
+    const ratio = Math.min(1000/img.width, 1000/img.height, 1);
     canvas.width  = Math.round(img.width  * ratio);
     canvas.height = Math.round(img.height * ratio);
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    resolve(canvas.toDataURL('image/jpeg', 0.5));
+    resolve(canvas.toDataURL('image/jpeg', 0.75));
   };
   img.onerror = reject;
   img.src = URL.createObjectURL(file);
@@ -1037,17 +1037,29 @@ function TaskItem({task,done,pending,goal,isIsa,delay,onToggle,onComplete,onSubm
   };
 
   // ── DONE state ──
-  if(done) return(
-    <div style={{display:'flex',alignItems:'center',gap:14,background:`${accentColor}14`,border:`1.5px solid ${accentColor}40`,borderRadius:18,padding:'12px 16px',marginBottom:8,animation:`fadeInUp 0.4s ${delay}ms both`,boxShadow:`0 4px 20px ${accentColor}18`}}>
-      <div style={{width:30,height:30,borderRadius:isIsa?10:'50%',background:doneGradient,display:'flex',alignItems:'center',justifyContent:'center',boxShadow:`0 0 12px ${accentColor}55`,flexShrink:0}}><span style={{fontSize:14}}>{checkIcon}</span></div>
-      <div style={{fontSize:22}}>{task.emoji}</div>
-      <div style={{flex:1}}>
-        <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:700,fontSize:14,textDecoration:'line-through',color:'rgba(255,255,255,0.35)'}}>{task.title}</div>
-        <div style={{color:`${accentColor}80`,fontSize:11,marginTop:2,fontFamily:"'Nunito',sans-serif"}}>✅ Done · 🌟 {task.minutes} min earned</div>
+  if(done) {
+    const canUndo = !task.requiresProof && !task.isMantras && !task.isGoal && !task.isGoalReview;
+    return(
+      <div style={{display:'flex',alignItems:'center',gap:14,background:`${accentColor}14`,border:`1.5px solid ${accentColor}40`,borderRadius:18,padding:'12px 16px',marginBottom:8,animation:`fadeInUp 0.4s ${delay}ms both`,boxShadow:`0 4px 20px ${accentColor}18`}}>
+        <div style={{width:30,height:30,borderRadius:isIsa?10:'50%',background:doneGradient,display:'flex',alignItems:'center',justifyContent:'center',boxShadow:`0 0 12px ${accentColor}55`,flexShrink:0}}><span style={{fontSize:14}}>{checkIcon}</span></div>
+        <div style={{fontSize:22}}>{task.emoji}</div>
+        <div style={{flex:1}}>
+          <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:700,fontSize:14,textDecoration:'line-through',color:'rgba(255,255,255,0.35)'}}>{task.title}</div>
+          <div style={{color:`${accentColor}80`,fontSize:11,marginTop:2,fontFamily:"'Nunito',sans-serif"}}>
+            {task.requiresProof ? '✅ Approved by parent' : '✅ Done'} · 🌟 {task.minutes} min earned
+          </div>
+        </div>
+        {canUndo ? (
+          <button onClick={onToggle} title="Undo this task"
+            style={{background:'rgba(255,255,255,0.08)',border:'1px solid rgba(255,255,255,0.2)',borderRadius:10,padding:'5px 10px',color:'rgba(255,255,255,0.45)',cursor:'pointer',fontSize:12,fontFamily:"'Nunito',sans-serif",flexShrink:0}}>
+            ↩ Undo
+          </button>
+        ) : (
+          <div style={{fontSize:18,animation:'float 2s ease infinite'}}>{doneFloatIcon}</div>
+        )}
       </div>
-      <div style={{fontSize:18,animation:'float 2s ease infinite'}}>{doneFloatIcon}</div>
-    </div>
-  );
+    );
+  }
 
   // ── PENDING PROOF state ──
   if(pending) return(
