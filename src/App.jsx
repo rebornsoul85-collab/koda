@@ -116,6 +116,16 @@ const DEFAULT = {
   tasks: { isabella: makeRoutine('ib'), jocelyn: makeRoutine('jc') },
 };
 
+const DEFAULT_REWARDS = [
+  { id:'rwd1', title:'Ice cream',               emoji:'🍦', stars:50   },
+  { id:'rwd2', title:'15 min extra phone time', emoji:'📱', stars:75   },
+  { id:'rwd3', title:'1 hour extra phone time', emoji:'📱', stars:200  },
+  { id:'rwd4', title:'Going out',               emoji:'🚗', stars:300  },
+  { id:'rwd5', title:'Art & craft supplies',    emoji:'🎨', stars:350  },
+  { id:'rwd6', title:'All day phone time',      emoji:'📱', stars:600  },
+  { id:'rwd7', title:'$10 cash',                emoji:'💵', stars:1000 },
+];
+
 /* ══════════════════════════════════════════
    GLOBAL CSS
 ══════════════════════════════════════════ */
@@ -144,6 +154,8 @@ export default function App() {
   const [bal,       setBal]       = useState({ isabella:0,  jocelyn:0  });
   const [proofs,    setProofs]    = useState({ isabella:{}, jocelyn:{} });
   const [goals,     setGoals]     = useState({ isabella:'', jocelyn:'' });
+  const [rewards,   setRewards]   = useState(DEFAULT_REWARDS);
+  const [rewardReqs,setRewardReqs]= useState([]);
   const [loading,   setLoading]   = useState(true);
 
   useEffect(() => {
@@ -164,16 +176,19 @@ export default function App() {
     const cfg = raw ? JSON.parse(raw) : DEFAULT;
     setConfig(cfg);
     const today = TODAY();
-    const [ib,jc,ibB,jcB,ibP,jcP,ibG,jcG] = await Promise.all([
+    const [ib,jc,ibB,jcB,ibP,jcP,ibG,jcG,rwds,reqs] = await Promise.all([
       S.get(`cm-c-isabella-${today}`), S.get(`cm-c-jocelyn-${today}`),
       S.get('cm-b-isabella'),          S.get('cm-b-jocelyn'),
       S.get(`cm-proofs-isabella-${today}`), S.get(`cm-proofs-jocelyn-${today}`),
       S.get(`cm-goal-isabella-${today}`),   S.get(`cm-goal-jocelyn-${today}`),
+      S.get('cm-rewards'),                  S.get('cm-reward-requests'),
     ]);
     setComp({   isabella: ib  ? JSON.parse(ib)  : [], jocelyn: jc  ? JSON.parse(jc)  : [] });
     setBal({    isabella: ibB ? parseInt(ibB)    : 0,  jocelyn: jcB ? parseInt(jcB)   : 0  });
     setProofs({ isabella: ibP ? JSON.parse(ibP) : {}, jocelyn: jcP ? JSON.parse(jcP) : {} });
     setGoals({  isabella: ibG || '', jocelyn: jcG || '' });
+    setRewards( rwds ? JSON.parse(rwds) : DEFAULT_REWARDS );
+    setRewardReqs( reqs ? JSON.parse(reqs) : [] );
     setLoading(false);
   };
 
@@ -260,13 +275,46 @@ export default function App() {
     await S.set(`cm-b-${user}`, String(newBal));
   };
 
+  // Save the reward catalog
+  const saveRewards = async (updated) => {
+    setRewards(updated);
+    await S.set('cm-rewards', JSON.stringify(updated));
+  };
+
+  // Kid requests a reward
+  const requestReward = async (user, reward) => {
+    const req = { id: uid(), user, rewardId: reward.id, rewardTitle: reward.title, rewardEmoji: reward.emoji, stars: reward.stars, requestedAt: new Date().toISOString() };
+    const updated = [...rewardReqs, req];
+    setRewardReqs(updated);
+    await S.set('cm-reward-requests', JSON.stringify(updated));
+  };
+
+  // Parent approves reward request — deduct stars, remove request
+  const approveRewardReq = async (reqId) => {
+    const req = rewardReqs.find(r => r.id === reqId);
+    if (!req) return;
+    const newBal = Math.max(0, bal[req.user] - req.stars);
+    setBal(p => ({ ...p, [req.user]: newBal }));
+    await S.set(`cm-b-${req.user}`, String(newBal));
+    const updated = rewardReqs.filter(r => r.id !== reqId);
+    setRewardReqs(updated);
+    await S.set('cm-reward-requests', JSON.stringify(updated));
+  };
+
+  // Parent denies — just remove request, no star deduction
+  const denyRewardReq = async (reqId) => {
+    const updated = rewardReqs.filter(r => r.id !== reqId);
+    setRewardReqs(updated);
+    await S.set('cm-reward-requests', JSON.stringify(updated));
+  };
+
   if (loading) return <div style={{minHeight:'100vh',background:'#0d0d2b',display:'flex',alignItems:'center',justifyContent:'center'}}><div style={{color:'white',fontFamily:'sans-serif',fontSize:20}}>🌟 Loading Koda…</div></div>;
 
   if (view==='landing')   return <Landing onSelect={t=>{setPinTarget(t);setView('pin');}}/>;
   if (view==='pin')       return <PinScreen target={pinTarget} config={config} onSuccess={()=>setView(pinTarget)} onBack={()=>setView('landing')}/>;
-  if (view==='parent')    return <ParentView config={config} saveConfig={saveConfig} comp={comp} bal={bal} proofs={proofs} goals={goals} redeem={redeem} approveProof={approveProof} rejectProof={rejectProof} toggleProofRequired={toggleProofRequired} logout={()=>setView('landing')}/>;
-  if (view==='isabella')  return <KidView user="isabella" theme="kawaii" tasks={config.tasks.isabella} comp={comp.isabella} proofs={proofs.isabella} goal={goals.isabella} onToggle={id=>toggleTask('isabella',id)} onComplete={id=>completeTask('isabella',id)} onSubmitProof={(id,p)=>submitProof('isabella',id,p)} onSetGoal={g=>submitGoal('isabella',g)} bal={bal.isabella} logout={()=>setView('landing')}/>;
-  if (view==='jocelyn')   return <KidView user="jocelyn"  theme="spidey" tasks={config.tasks.jocelyn}  comp={comp.jocelyn}  proofs={proofs.jocelyn}  goal={goals.jocelyn}  onToggle={id=>toggleTask('jocelyn',id)}  onComplete={id=>completeTask('jocelyn',id)}  onSubmitProof={(id,p)=>submitProof('jocelyn',id,p)}  onSetGoal={g=>submitGoal('jocelyn',g)}  bal={bal.jocelyn}  logout={()=>setView('landing')}/>;
+  if (view==='parent')    return <ParentView config={config} saveConfig={saveConfig} comp={comp} bal={bal} proofs={proofs} goals={goals} rewards={rewards} rewardReqs={rewardReqs} redeem={redeem} approveProof={approveProof} rejectProof={rejectProof} toggleProofRequired={toggleProofRequired} saveRewards={saveRewards} approveRewardReq={approveRewardReq} denyRewardReq={denyRewardReq} logout={()=>setView('landing')}/>;
+  if (view==='isabella')  return <KidView user="isabella" theme="kawaii" tasks={config.tasks.isabella} comp={comp.isabella} proofs={proofs.isabella} goal={goals.isabella} rewards={rewards} rewardReqs={rewardReqs.filter(r=>r.user==='isabella')} bal={bal.isabella} onToggle={id=>toggleTask('isabella',id)} onComplete={id=>completeTask('isabella',id)} onSubmitProof={(id,p)=>submitProof('isabella',id,p)} onSetGoal={g=>submitGoal('isabella',g)} onRequestReward={r=>requestReward('isabella',r)} logout={()=>setView('landing')}/>;
+  if (view==='jocelyn')   return <KidView user="jocelyn"  theme="spidey" tasks={config.tasks.jocelyn}  comp={comp.jocelyn}  proofs={proofs.jocelyn}  goal={goals.jocelyn}  rewards={rewards} rewardReqs={rewardReqs.filter(r=>r.user==='jocelyn')}  bal={bal.jocelyn}  onToggle={id=>toggleTask('jocelyn',id)}  onComplete={id=>completeTask('jocelyn',id)}  onSubmitProof={(id,p)=>submitProof('jocelyn',id,p)}  onSetGoal={g=>submitGoal('jocelyn',g)}  onRequestReward={r=>requestReward('jocelyn',r)}  logout={()=>setView('landing')}/>;
   return null;
 }
 
@@ -360,7 +408,7 @@ function PinScreen({target,config,onSuccess,onBack}) {
 /* ══════════════════════════════════════════
    PARENT DASHBOARD
 ══════════════════════════════════════════ */
-function ParentView({config,saveConfig,comp,bal,proofs,goals,redeem,approveProof,rejectProof,toggleProofRequired,logout}) {
+function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,redeem,approveProof,rejectProof,toggleProofRequired,saveRewards,approveRewardReq,denyRewardReq,logout}) {
   const [tab,setTab]=useState('overview');
   const [addFor,setAddFor]=useState(null);
   const [newTask,setNewTask]=useState({title:'',emoji:'⭐',recurring:true,minutes:15,requiresProof:false,timeOfDay:'morning'});
@@ -368,7 +416,8 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,redeem,approveProof
   const [redeemAmt,setRedeemAmt]=useState({isabella:'',jocelyn:''});
   const [newPins,setNewPins]=useState({parent:'',isabella:'',jocelyn:''});
   const [savedMsg,setSavedMsg]=useState('');
-  const pendingCount=Object.keys(proofs.isabella||{}).length+Object.keys(proofs.jocelyn||{}).length;
+  const pendingProofs=Object.keys(proofs.isabella||{}).length+Object.keys(proofs.jocelyn||{}).length;
+  const pendingRewards=rewardReqs.length;
 
   const addTask=user=>{
     if(!newTask.title.trim())return;
@@ -383,7 +432,15 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,redeem,approveProof
     setNewPins({parent:'',isabella:'',jocelyn:''});setSavedMsg('✅ PINs saved!');setTimeout(()=>setSavedMsg(''),2500);
   };
 
-  const TABS=[{id:'overview',label:'🏠',title:'Overview'},{id:'proof',label:'📸',title:'Proof',badge:pendingCount},{id:'isabella',label:'🌸',title:'Isabella'},{id:'jocelyn',label:'🕷️',title:'Jossy'},{id:'rewards',label:'🏆',title:'Rewards'},{id:'settings',label:'⚙️',title:'Settings'}];
+  const TABS=[
+    {id:'overview',  label:'🏠', title:'Overview'},
+    {id:'proof',     label:'📸', title:'Proof',   badge:pendingProofs},
+    {id:'rewards',   label:'🎁', title:'Requests', badge:pendingRewards},
+    {id:'store',     label:'🛍️', title:'Rewards'},
+    {id:'isabella',  label:'🌸', title:'Isabella'},
+    {id:'jocelyn',   label:'🕷️', title:'Jossy'},
+    {id:'settings',  label:'⚙️', title:'Settings'},
+  ];
 
   return (
     <div style={{minHeight:'100vh',background:'#0a0f1e',fontFamily:"'Nunito',sans-serif",color:'white'}}>
@@ -404,15 +461,17 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,redeem,approveProof
 
       <div style={{padding:'20px',maxWidth:580,margin:'0 auto'}}>
 
-        {tab==='overview'&&<ParentOverview comp={comp} bal={bal} proofs={proofs} goals={goals} config={config} onShowProof={()=>setTab('proof')}/>}
+        {tab==='overview'&&<ParentOverview comp={comp} bal={bal} proofs={proofs} goals={goals} config={config} rewardReqs={rewardReqs} onShowProof={()=>setTab('proof')} onShowRewards={()=>setTab('rewards')}/>}
         {tab==='proof'&&<ProofInbox proofs={proofs} config={config} onApprove={approveProof} onReject={rejectProof}/>}
+        {tab==='rewards'&&<RewardRequests rewardReqs={rewardReqs} bal={bal} onApprove={approveRewardReq} onDeny={denyRewardReq}/>}
+        {tab==='store'&&<ManageRewards rewards={rewards} saveRewards={saveRewards}/>}
 
         {(tab==='isabella'||tab==='jocelyn')&&(
           <ParentTaskTab user={tab} tasks={config.tasks[tab]} comp={comp[tab]} proofs={proofs[tab]||{}} onAdd={()=>setAddFor(tab)} onDel={id=>delTask(tab,id)} onToggleProof={id=>toggleProofRequired(tab,id)} addFor={addFor} newTask={newTask} setNewTask={setNewTask} showEmoji={showEmoji} setShowEmoji={setShowEmoji} onConfirm={()=>addTask(tab)} onCancel={()=>{setAddFor(null);setShowEmoji(false);}}/>
         )}
 
-        {tab==='rewards'&&<>
-          <h2 style={{fontWeight:800,fontSize:20,marginBottom:16}}>🏆 Screen Time Rewards</h2>
+        {tab==='screentime'&&<>
+          <h2 style={{fontWeight:800,fontSize:20,marginBottom:16}}>⏱️ Screen Time Bank</h2>
           {['isabella','jocelyn'].map(u=>{
             const color=u==='isabella'?'#f107a3':'#e91e63';
             const name=u==='isabella'?'🌸 Isabella':'🕷️ Jossy';
@@ -449,8 +508,9 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,redeem,approveProof
   );
 }
 
-function ParentOverview({comp,bal,proofs,goals,config,onShowProof}) {
-  const pendingCount=Object.keys(proofs.isabella||{}).length+Object.keys(proofs.jocelyn||{}).length;
+function ParentOverview({comp,bal,proofs,goals,config,rewardReqs,onShowProof,onShowRewards}) {
+  const pendingProofs=Object.keys(proofs.isabella||{}).length+Object.keys(proofs.jocelyn||{}).length;
+  const pendingRewards=rewardReqs.length;
   return(
     <>
       <h2 style={{fontWeight:800,fontSize:20,marginBottom:16}}>📊 Today&apos;s Overview</h2>
@@ -477,12 +537,21 @@ function ParentOverview({comp,bal,proofs,goals,config,onShowProof}) {
           </div>
         );
       })}
-      {pendingCount>0&&(
+      {pendingProofs>0&&(
         <div onClick={onShowProof} style={{background:'rgba(251,191,36,0.1)',border:'1px solid rgba(251,191,36,0.35)',borderRadius:14,padding:'14px 18px',cursor:'pointer',display:'flex',alignItems:'center',gap:12,marginTop:4}}>
           <span style={{fontSize:28}}>📸</span>
           <div style={{flex:1}}>
-            <div style={{fontWeight:700,color:'#fbbf24'}}>{pendingCount} photo{pendingCount>1?'s':''} waiting for your approval!</div>
+            <div style={{fontWeight:700,color:'#fbbf24'}}>{pendingProofs} photo{pendingProofs>1?'s':''} waiting for your approval!</div>
             <div style={{fontSize:12,color:'rgba(255,255,255,0.4)',marginTop:2}}>Tap to review →</div>
+          </div>
+        </div>
+      )}
+      {pendingRewards>0&&(
+        <div onClick={onShowRewards} style={{background:'rgba(99,179,237,0.1)',border:'1px solid rgba(99,179,237,0.35)',borderRadius:14,padding:'14px 18px',cursor:'pointer',display:'flex',alignItems:'center',gap:12,marginTop:8}}>
+          <span style={{fontSize:28}}>🎁</span>
+          <div style={{flex:1}}>
+            <div style={{fontWeight:700,color:'#60a5fa'}}>{pendingRewards} reward request{pendingRewards>1?'s':''} waiting!</div>
+            <div style={{fontSize:12,color:'rgba(255,255,255,0.4)',marginTop:2}}>Tap to approve or deny →</div>
           </div>
         </div>
       )}
@@ -642,8 +711,9 @@ function Toggle({on,color,onChange}) {
 /* ══════════════════════════════════════════
    SHARED KID VIEW  (renders Isabella or Jossy)
 ══════════════════════════════════════════ */
-function KidView({user,theme,tasks,comp,proofs,goal,onToggle,onComplete,onSubmitProof,onSetGoal,bal,logout}) {
+function KidView({user,theme,tasks,comp,proofs,goal,rewards,rewardReqs,onToggle,onComplete,onSubmitProof,onSetGoal,onRequestReward,bal,logout}) {
   const isIsa = theme==='kawaii';
+  const [kidTab, setKidTab] = useState('tasks');
   const done  = comp.length;
   const total = tasks.length;
   const pct   = total>0?Math.round(done/total*100):0;
@@ -663,8 +733,6 @@ function KidView({user,theme,tasks,comp,proofs,goal,onToggle,onComplete,onSubmit
   const btnExitBg  = isIsa ? 'rgba(241,7,163,0.15)' : 'rgba(233,30,99,0.15)';
   const btnExitBdr = isIsa ? 'rgba(255,182,213,0.3)' : 'rgba(255,100,150,0.3)';
   const btnExitClr = isIsa ? 'rgba(255,182,213,0.85)' : 'rgba(255,182,193,0.8)';
-  const starBadgeBg  = isIsa ? 'rgba(255,215,0,0.12)' : 'rgba(233,30,99,0.15)';
-  const starBadgeBdr = isIsa ? 'rgba(255,215,0,0.3)'  : 'rgba(255,107,157,0.35)';
 
   // progress msg
   const msg = done===0 ? (isIsa?"Let's go! がんばって！ 🌸":"Time to sling some tasks, girl 🕷️")
@@ -702,15 +770,29 @@ function KidView({user,theme,tasks,comp,proofs,goal,onToggle,onComplete,onSubmit
             <div style={{background:barBg,width:`${pct}%`,height:'100%',borderRadius:100,transition:'width 0.7s cubic-bezier(.34,1.56,.64,1)',boxShadow:`0 0 18px ${accentColor}90`}}/>
           </div>
         </div>
-      </div>
-
-      {/* Stars badge */}
-      <div style={{padding:'14px 20px 4px',position:'relative',zIndex:2}}>
-        <div style={{display:'inline-flex',alignItems:'center',gap:8,background:starBadgeBg,border:`1px solid ${starBadgeBdr}`,borderRadius:20,padding:'6px 16px'}}>
-          <span style={{fontSize:16}}>🌟</span>
-          <span style={{fontFamily:"'Nunito',sans-serif",fontWeight:800,color:starColor,fontSize:14}}>{bal} Koda stars earned{isIsa?'!':" 💅"}</span>
+        {/* Tab bar */}
+        <div style={{display:'flex',gap:6,marginTop:14,background:'rgba(255,255,255,0.06)',borderRadius:14,padding:4}}>
+          {[{id:'tasks',label:'📋 Tasks'},{id:'store',label:'🏪 Reward Store'}].map(t=>(
+            <button key={t.id} onClick={()=>setKidTab(t.id)} style={{flex:1,background:kidTab===t.id?isIsa?'linear-gradient(135deg,#f107a3,#7b2ff7)':'linear-gradient(135deg,#8b0000,#e91e63)':'transparent',border:'none',borderRadius:10,padding:'8px',color:'white',fontWeight:kidTab===t.id?700:400,cursor:'pointer',fontSize:13,fontFamily:"'Nunito',sans-serif",opacity:kidTab===t.id?1:0.5,transition:'all 0.2s',boxShadow:kidTab===t.id?`0 2px 8px ${isIsa?'#f107a340':'#e91e6340'}`:'none'}}>{t.label}</button>
+          ))}
         </div>
       </div>
+
+      {/* Stars badge — always visible */}
+      <div style={{padding:'14px 20px 4px',position:'relative',zIndex:2}}>
+        <div style={{display:'inline-flex',alignItems:'center',gap:8,background:isIsa?'rgba(255,215,0,0.12)':'rgba(233,30,99,0.15)',border:`1px solid ${isIsa?'rgba(255,215,0,0.3)':'rgba(255,107,157,0.35)'}`,borderRadius:20,padding:'6px 16px'}}>
+          <span style={{fontSize:16}}>🌟</span>
+          <span style={{fontFamily:"'Nunito',sans-serif",fontWeight:800,color:isIsa?'#ffd700':'#ff9dbe',fontSize:14}}>{bal} Koda stars{isIsa?' earned!':" earned 💅"}</span>
+        </div>
+      </div>
+
+      {/* STORE TAB */}
+      {kidTab==='store'&&(
+        <KidStore rewards={rewards} rewardReqs={rewardReqs} bal={bal} isIsa={isIsa} onRequest={onRequestReward}/>
+      )}
+
+      {/* TASKS TAB */}
+      {kidTab==='tasks'&&<>
 
       {/* Goal display (if set) */}
       {goal&&(
@@ -762,6 +844,7 @@ function KidView({user,theme,tasks,comp,proofs,goal,onToggle,onComplete,onSubmit
           <div style={{fontFamily:"'Nunito',sans-serif",fontSize:13,color:'rgba(255,255,255,0.8)'}}>{allDoneMsg}</div>
         </div>
       )}
+      </>}
     </div>
   );
 }
@@ -935,4 +1018,164 @@ function TaskItem({task,done,pending,goal,isIsa,delay,onToggle,onComplete,onSubm
 function SakuraDecor() {
   const items=[{x:8,delay:0,dur:8,size:18,icon:'🌸'},{x:22,delay:1.5,dur:10,size:14,icon:'✨'},{x:40,delay:3,dur:7,size:16,icon:'⭐'},{x:58,delay:0.8,dur:11,size:12,icon:'🌸'},{x:72,delay:2.2,dur:9,size:20,icon:'💫'},{x:85,delay:4,dur:8,size:14,icon:'🎀'},{x:93,delay:1,dur:12,size:16,icon:'🌟'},{x:15,delay:5,dur:9,size:13,icon:'✨'},{x:50,delay:6,dur:10,size:18,icon:'🌸'},{x:66,delay:3.5,dur:7,size:15,icon:'🎀'}];
   return <div style={{position:'fixed',inset:0,pointerEvents:'none',zIndex:0,overflow:'hidden'}}>{items.map((item,i)=><div key={i} style={{position:'absolute',left:`${item.x}%`,top:'-30px',fontSize:item.size,animation:`sakura ${item.dur}s ${item.delay}s infinite linear`,opacity:0.65}}>{item.icon}</div>)}</div>;
+}
+
+/* ══════════════════════════════════════════
+   REWARD REQUESTS  (parent view)
+══════════════════════════════════════════ */
+function RewardRequests({rewardReqs,bal,onApprove,onDeny}) {
+  if(rewardReqs.length===0) return(
+    <div style={{textAlign:'center',padding:'60px 20px'}}>
+      <div style={{fontSize:48,marginBottom:12}}>🎁</div>
+      <div style={{color:'rgba(255,255,255,0.5)',fontSize:16,fontWeight:600}}>No reward requests!</div>
+      <div style={{color:'rgba(255,255,255,0.3)',fontSize:13,marginTop:6}}>When the girls request a reward, it&apos;ll show up here.</div>
+    </div>
+  );
+  return(
+    <div>
+      <h2 style={{fontWeight:800,fontSize:20,marginBottom:6}}>🎁 Reward Requests</h2>
+      <p style={{color:'rgba(255,255,255,0.4)',fontSize:13,marginBottom:20}}>{rewardReqs.length} request{rewardReqs.length>1?'s':''} waiting</p>
+      {rewardReqs.map(req=>{
+        const isIsa=req.user==='isabella';
+        const color=isIsa?'#f107a3':'#e91e63';
+        const name=isIsa?'🌸 Isabella':'🕷️ Jossy';
+        const userBal=bal[req.user];
+        const canAfford=userBal>=req.stars;
+        const time=new Date(req.requestedAt).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
+        return(
+          <div key={req.id} style={{background:'rgba(255,255,255,0.04)',border:`1px solid ${color}40`,borderRadius:18,padding:20,marginBottom:14}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+              <span style={{fontWeight:700,fontSize:16,color}}>{name}</span>
+              <span style={{color:'rgba(255,255,255,0.35)',fontSize:12}}>{time}</span>
+            </div>
+            <div style={{display:'flex',alignItems:'center',gap:12,background:'rgba(255,255,255,0.05)',borderRadius:14,padding:'12px 14px',marginBottom:12}}>
+              <span style={{fontSize:32}}>{req.rewardEmoji}</span>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:700,fontSize:16,color:'white'}}>{req.rewardTitle}</div>
+                <div style={{fontSize:13,color:'rgba(255,255,255,0.5)',marginTop:2}}>Costs: 🌟 {req.stars} stars</div>
+              </div>
+            </div>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+              <span style={{fontSize:13,color:'rgba(255,255,255,0.5)'}}>
+                Current balance: <span style={{color:'#ffd700',fontWeight:700}}>🌟 {userBal} stars</span>
+              </span>
+              {!canAfford&&<span style={{fontSize:12,color:'#f87171',fontWeight:600}}>⚠️ Not enough stars</span>}
+            </div>
+            <div style={{display:'flex',gap:10}}>
+              <button onClick={()=>onApprove(req.id)} style={{flex:1,background:'rgba(74,222,128,0.15)',border:'1.5px solid rgba(74,222,128,0.4)',borderRadius:12,padding:'10px',color:'#4ade80',fontWeight:700,cursor:'pointer',fontSize:14,fontFamily:'inherit'}}>✅ Approve</button>
+              <button onClick={()=>onDeny(req.id)} style={{flex:1,background:'rgba(239,68,68,0.12)',border:'1.5px solid rgba(239,68,68,0.3)',borderRadius:12,padding:'10px',color:'#f87171',fontWeight:700,cursor:'pointer',fontSize:14,fontFamily:'inherit'}}>❌ Deny</button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════
+   MANAGE REWARDS  (parent view)
+══════════════════════════════════════════ */
+function ManageRewards({rewards,saveRewards}) {
+  const [newReward,setNewReward]=useState({title:'',emoji:'🎁',stars:100});
+  const [showEmoji,setShowEmoji]=useState(false);
+
+  const add=()=>{
+    if(!newReward.title.trim()||!newReward.stars)return;
+    saveRewards([...rewards,{id:uid(),...newReward}]);
+    setNewReward({title:'',emoji:'🎁',stars:100});
+    setShowEmoji(false);
+  };
+  const del=(id)=>saveRewards(rewards.filter(r=>r.id!==id));
+
+  return(
+    <div>
+      <h2 style={{fontWeight:800,fontSize:20,marginBottom:6}}>🛍️ Reward Store</h2>
+      <p style={{color:'rgba(255,255,255,0.4)',fontSize:13,marginBottom:20}}>Add, remove, or adjust rewards the girls can redeem</p>
+
+      {/* Add new reward */}
+      <div style={{background:'rgba(255,255,255,0.05)',borderRadius:18,padding:18,marginBottom:24,border:'1px solid rgba(99,179,237,0.3)'}}>
+        <div style={{fontWeight:700,marginBottom:12,color:'#60a5fa'}}>+ Add New Reward</div>
+        <div style={{display:'flex',gap:8,marginBottom:10}}>
+          <button onClick={()=>setShowEmoji(!showEmoji)} style={{background:'rgba(255,255,255,0.1)',border:'1px solid rgba(255,255,255,0.2)',borderRadius:10,padding:'8px 12px',fontSize:22,cursor:'pointer'}}>{newReward.emoji}</button>
+          <input placeholder="Reward name…" value={newReward.title} onChange={e=>setNewReward(p=>({...p,title:e.target.value}))} style={{flex:1,background:'rgba(255,255,255,0.07)',border:'1px solid rgba(255,255,255,0.13)',borderRadius:10,padding:'8px 12px',color:'white',fontSize:14,fontFamily:'inherit',outline:'none'}}/>
+        </div>
+        {showEmoji&&<div style={{background:'rgba(0,0,0,0.3)',borderRadius:12,padding:10,marginBottom:10,display:'flex',flexWrap:'wrap',gap:8}}>{['🍦','📱','🚗','🎨','💵','🍕','🎮','🛍️','🎁','🌮','🍿','💅','🎭','🏊','🎤','🛒','🍰','✈️','🎪','🎯'].map(e=><span key={e} onClick={()=>{setNewReward(p=>({...p,emoji:e}));setShowEmoji(false);}} style={{fontSize:22,cursor:'pointer'}}>{e}</span>)}</div>}
+        <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:14}}>
+          <span style={{color:'rgba(255,255,255,0.55)',fontSize:13}}>🌟 Stars required:</span>
+          <input type="number" value={newReward.stars} onChange={e=>setNewReward(p=>({...p,stars:parseInt(e.target.value)||0}))} style={{width:80,background:'rgba(255,255,255,0.07)',border:'1px solid rgba(255,255,255,0.13)',borderRadius:8,padding:'6px 10px',color:'white',fontSize:14,fontFamily:'inherit',outline:'none'}}/>
+        </div>
+        <button onClick={add} style={{width:'100%',background:'#2563eb',border:'none',borderRadius:12,padding:'10px',color:'white',fontWeight:700,cursor:'pointer',fontSize:14,fontFamily:'inherit'}}>Add Reward</button>
+      </div>
+
+      {/* Existing rewards */}
+      {rewards.map(r=>(
+        <div key={r.id} style={{display:'flex',alignItems:'center',gap:12,background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.07)',borderRadius:14,padding:'12px 16px',marginBottom:8}}>
+          <span style={{fontSize:28}}>{r.emoji}</span>
+          <div style={{flex:1}}>
+            <div style={{fontWeight:600,fontSize:15,color:'white'}}>{r.title}</div>
+            <div style={{color:'rgba(255,255,255,0.4)',fontSize:12,marginTop:2}}>🌟 {r.stars} stars</div>
+          </div>
+          <button onClick={()=>del(r.id)} style={{background:'rgba(239,68,68,0.1)',border:'1px solid rgba(239,68,68,0.2)',borderRadius:8,padding:'6px 10px',color:'#f87171',cursor:'pointer',fontSize:12,fontFamily:'inherit'}}>✕</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════
+   KID REWARD STORE
+══════════════════════════════════════════ */
+function KidStore({rewards,rewardReqs,bal,isIsa,onRequest}) {
+  const accentColor=isIsa?'#f107a3':'#e91e63';
+  const doneGradient=isIsa?'linear-gradient(135deg,#f107a3,#7b2ff7)':'linear-gradient(135deg,#8b0000,#e91e63)';
+  const starColor=isIsa?'#ffd700':'#ff9dbe';
+  const ff=isIsa?"'Fredoka One','Nunito',sans-serif":"'Poppins','Nunito',sans-serif";
+
+  return(
+    <div style={{padding:'16px 20px 100px',position:'relative',zIndex:2}}>
+      {/* Balance */}
+      <div style={{background:'rgba(255,255,255,0.06)',borderRadius:18,padding:'16px 20px',marginBottom:20,textAlign:'center',border:`1px solid ${accentColor}40`}}>
+        <div style={{fontSize:36,marginBottom:4,filter:`drop-shadow(0 0 12px ${accentColor})`}}>🌟</div>
+        <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:900,fontSize:32,color:starColor}}>{bal}</div>
+        <div style={{fontFamily:"'Nunito',sans-serif",fontSize:13,color:'rgba(255,255,255,0.5)',marginTop:2}}>Koda stars available</div>
+      </div>
+
+      <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:800,fontSize:16,color:'rgba(255,255,255,0.8)',marginBottom:14}}>✨ Available Rewards</div>
+
+      {rewards.map(reward=>{
+        const canAfford=bal>=reward.stars;
+        const alreadyRequested=rewardReqs.some(r=>r.rewardId===reward.id);
+        const pct=Math.min(100,Math.round(bal/reward.stars*100));
+        return(
+          <div key={reward.id} style={{background:alreadyRequested?'rgba(99,179,237,0.1)':canAfford?`${accentColor}14`:'rgba(255,255,255,0.04)',border:`1.5px solid ${alreadyRequested?'rgba(99,179,237,0.35)':canAfford?`${accentColor}50`:'rgba(255,255,255,0.08)'}`,borderRadius:18,padding:'14px 16px',marginBottom:10,transition:'all 0.2s'}}>
+            <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:canAfford?0:8}}>
+              <span style={{fontSize:32}}>{reward.emoji}</span>
+              <div style={{flex:1}}>
+                <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:700,fontSize:15,color:'white'}}>{reward.title}</div>
+                <div style={{fontFamily:"'Nunito',sans-serif",fontSize:12,color:'rgba(255,255,255,0.5)',marginTop:2}}>🌟 {reward.stars} stars</div>
+              </div>
+              {alreadyRequested
+                ? <div style={{background:'rgba(99,179,237,0.2)',borderRadius:12,padding:'6px 12px',color:'#60a5fa',fontFamily:"'Nunito',sans-serif",fontWeight:700,fontSize:12}}>⏳ Requested!</div>
+                : <button onClick={canAfford?()=>onRequest(reward):undefined} disabled={!canAfford}
+                    style={{background:canAfford?doneGradient:'rgba(255,255,255,0.08)',border:'none',borderRadius:12,padding:'8px 14px',color:'white',fontWeight:700,cursor:canAfford?'pointer':'default',fontSize:13,fontFamily:"'Nunito',sans-serif",opacity:canAfford?1:0.45,boxShadow:canAfford?`0 4px 12px ${accentColor}40`:'none',flexShrink:0}}>
+                    {canAfford?'Redeem ✨':'🔒'}
+                  </button>
+              }
+            </div>
+            {!canAfford&&!alreadyRequested&&(
+              <div style={{marginTop:6}}>
+                <div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}>
+                  <span style={{fontFamily:"'Nunito',sans-serif",fontSize:11,color:'rgba(255,255,255,0.35)'}}>Progress to reward</span>
+                  <span style={{fontFamily:"'Nunito',sans-serif",fontSize:11,color:'rgba(255,255,255,0.35)'}}>{bal}/{reward.stars} 🌟</span>
+                </div>
+                <div style={{background:'rgba(255,255,255,0.1)',borderRadius:100,height:6,overflow:'hidden'}}>
+                  <div style={{background:accentColor,width:`${pct}%`,height:'100%',borderRadius:100,transition:'width 0.5s ease',opacity:0.7}}/>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
