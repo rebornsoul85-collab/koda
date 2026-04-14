@@ -5,7 +5,7 @@ import { getDatabase, ref, set, get, onValue } from "firebase/database";
 /* ══════════════════════════════════════════
    VERSION
 ══════════════════════════════════════════ */
-const VERSION = 'v9';
+const VERSION = 'v10';
 
 /* ══════════════════════════════════════════
    FIREBASE
@@ -401,7 +401,7 @@ export default function App() {
 
   if (view==='landing')   return <Landing onSelect={t=>{setPinTarget(t);setView('pin');}}/>;
   if (view==='pin')       return <PinScreen target={pinTarget} config={config} onSuccess={()=>setView(pinTarget)} onBack={()=>setView('landing')}/>;
-  if (view==='parent')    return <><ParentView config={config} saveConfig={saveConfig} comp={comp} bal={bal} proofs={proofs} goals={goals} rewards={rewards} rewardReqs={rewardReqs} redeem={redeem} approveProof={approveProof} rejectProof={rejectProof} toggleProofRequired={toggleProofRequired} reorderTask={reorderTask} updateTaskStars={updateTaskStars} saveRewards={saveRewards} approveRewardReq={approveRewardReq} denyRewardReq={denyRewardReq} fbStatus={fbStatus} logout={()=>setView('landing')}/>{toast&&<Toast msg={toast}/>}</>;
+  if (view==='parent')    return <><ParentView config={config} saveConfig={saveConfig} comp={comp} bal={bal} proofs={proofs} goals={goals} rewards={rewards} rewardReqs={rewardReqs} redeem={redeem} approveProof={approveProof} rejectProof={rejectProof} toggleProofRequired={toggleProofRequired} reorderTask={reorderTask} updateTaskStars={updateTaskStars} saveRewards={saveRewards} approveRewardReq={approveRewardReq} denyRewardReq={denyRewardReq} fbStatus={fbStatus} toggleTask={toggleTask} logout={()=>setView('landing')}/>{toast&&<Toast msg={toast}/>}</>;
   if (view==='isabella')  return <><KidView user="isabella" theme="kawaii" tasks={config.tasks.isabella} comp={comp.isabella} proofs={proofs.isabella} goal={goals.isabella} rewards={rewards} rewardReqs={rewardReqs.filter(r=>r.user==='isabella')} bal={bal.isabella} onToggle={id=>toggleTask('isabella',id)} onComplete={id=>completeTask('isabella',id)} onSubmitProof={(id,p)=>submitProof('isabella',id,p)} onSetGoal={g=>submitGoal('isabella',g)} onRequestReward={r=>requestReward('isabella',r)} logout={()=>setView('landing')}/>{toast&&<Toast msg={toast}/>}</>;
   if (view==='jocelyn')   return <><KidView user="jocelyn"  theme="spidey" tasks={config.tasks.jocelyn}  comp={comp.jocelyn}  proofs={proofs.jocelyn}  goal={goals.jocelyn}  rewards={rewards} rewardReqs={rewardReqs.filter(r=>r.user==='jocelyn')}  bal={bal.jocelyn}  onToggle={id=>toggleTask('jocelyn',id)}  onComplete={id=>completeTask('jocelyn',id)}  onSubmitProof={(id,p)=>submitProof('jocelyn',id,p)}  onSetGoal={g=>submitGoal('jocelyn',g)}  onRequestReward={r=>requestReward('jocelyn',r)}  logout={()=>setView('landing')}/>{toast&&<Toast msg={toast}/>}</>;
   return null;
@@ -497,7 +497,7 @@ function PinScreen({target,config,onSuccess,onBack}) {
 /* ══════════════════════════════════════════
    PARENT DASHBOARD
 ══════════════════════════════════════════ */
-function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,redeem,approveProof,rejectProof,toggleProofRequired,reorderTask,updateTaskStars,saveRewards,approveRewardReq,denyRewardReq,fbStatus,logout}) {
+function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,redeem,approveProof,rejectProof,toggleProofRequired,reorderTask,updateTaskStars,saveRewards,approveRewardReq,denyRewardReq,fbStatus,toggleTask,logout}) {
   const [tab,setTab]=useState('overview');
   const [addFor,setAddFor]=useState(null);
   const [newTask,setNewTask]=useState({title:'',emoji:'⭐',recurring:true,minutes:15,requiresProof:false,timeOfDay:'morning'});
@@ -561,7 +561,7 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,
         {tab==='store'&&<ManageRewards rewards={rewards} saveRewards={saveRewards}/>}
 
         {(tab==='isabella'||tab==='jocelyn')&&(
-          <ParentTaskTab user={tab} tasks={config.tasks[tab]} comp={comp[tab]} proofs={proofs[tab]||{}} onAdd={()=>setAddFor(tab)} onDel={id=>delTask(tab,id)} onToggleProof={id=>toggleProofRequired(tab,id)} onReorder={(id,dir)=>reorderTask(tab,id,dir)} onUpdateStars={(id,s)=>updateTaskStars(tab,id,s)} addFor={addFor} newTask={newTask} setNewTask={setNewTask} showEmoji={showEmoji} setShowEmoji={setShowEmoji} onConfirm={()=>addTask(tab)} onCancel={()=>{setAddFor(null);setShowEmoji(false);}}/>
+          <ParentTaskTab user={tab} tasks={config.tasks[tab]} comp={comp[tab]} proofs={proofs[tab]||{}} onAdd={()=>setAddFor(tab)} onDel={id=>delTask(tab,id)} onToggleProof={id=>toggleProofRequired(tab,id)} onReorder={(id,dir)=>reorderTask(tab,id,dir)} onUpdateStars={(id,s)=>updateTaskStars(tab,id,s)} onUndo={id=>toggleTask(tab,id)} addFor={addFor} newTask={newTask} setNewTask={setNewTask} showEmoji={showEmoji} setShowEmoji={setShowEmoji} onConfirm={()=>addTask(tab)} onCancel={()=>{setAddFor(null);setShowEmoji(false);}}/>
         )}
 
         {tab==='screentime'&&<>
@@ -696,7 +696,7 @@ function ProofInbox({proofs,config,onApprove,onReject}) {
   );
 }
 
-function ParentTaskTab({user,tasks,comp,proofs,onAdd,onDel,onToggleProof,onReorder,onUpdateStars,addFor,newTask,setNewTask,showEmoji,setShowEmoji,onConfirm,onCancel}) {
+function ParentTaskTab({user,tasks,comp,proofs,onAdd,onDel,onToggleProof,onReorder,onUpdateStars,onUndo,addFor,newTask,setNewTask,showEmoji,setShowEmoji,onConfirm,onCancel}) {
   const color=user==='isabella'?'#f107a3':'#e91e63';
   const name=user==='isabella'?'🌸 Isabella':'🕷️ Jossy';
   const groups={};
@@ -772,7 +772,7 @@ function ParentTaskTab({user,tasks,comp,proofs,onAdd,onDel,onToggleProof,onReord
               const isLast=grpIdx===grpTasks.length-1;
               return(
                 <TaskRow key={task.id} task={task} done={done} pending={pending} isFirst={isFirst} isLast={isLast} color={color}
-                  onReorder={onReorder} onToggleProof={onToggleProof} onDel={onDel} onUpdateStars={onUpdateStars}/>
+                  onReorder={onReorder} onToggleProof={onToggleProof} onDel={onDel} onUpdateStars={onUpdateStars} onUndo={onUndo}/>
               );
             })}
           </div>
@@ -782,7 +782,7 @@ function ParentTaskTab({user,tasks,comp,proofs,onAdd,onDel,onToggleProof,onReord
   );
 }
 
-function TaskRow({task,done,pending,isFirst,isLast,color,onReorder,onToggleProof,onDel,onUpdateStars}) {
+function TaskRow({task,done,pending,isFirst,isLast,color,onReorder,onToggleProof,onDel,onUpdateStars,onUndo}) {
   const [editingStars, setEditingStars] = useState(false);
   const [starsVal,     setStarsVal]     = useState(task.minutes);
 
@@ -842,9 +842,15 @@ function TaskRow({task,done,pending,isFirst,isLast,color,onReorder,onToggleProof
         </div>
       </div>
 
-      {/* 📷 proof toggle */}
-      <button onClick={()=>onToggleProof(task.id)} title={task.requiresProof?'Photo proof ON — tap to turn off':'Tap to require photo proof'}
-        style={{background:task.requiresProof?`${color}25`:'rgba(255,255,255,0.06)',border:`1px solid ${task.requiresProof?color:'rgba(255,255,255,0.15)'}`,borderRadius:8,padding:'4px 7px',color:task.requiresProof?color:'rgba(255,255,255,0.3)',cursor:'pointer',fontSize:13,flexShrink:0}}>📷</button>
+      {/* ↩ undo (parent only) — shown when task is completed */}
+      {done && (
+        <button onClick={()=>onUndo(task.id)} title="Undo this completion"
+          style={{background:'rgba(251,191,36,0.12)',border:'1px solid rgba(251,191,36,0.3)',borderRadius:8,padding:'4px 8px',color:'#fbbf24',cursor:'pointer',fontSize:12,fontFamily:'inherit',flexShrink:0}}>↩</button>
+      )}
+
+      {/* 📷 proof toggle — hidden when done */}
+      {!done&&<button onClick={()=>onToggleProof(task.id)} title={task.requiresProof?'Photo proof ON — tap to turn off':'Tap to require photo proof'}
+        style={{background:task.requiresProof?`${color}25`:'rgba(255,255,255,0.06)',border:`1px solid ${task.requiresProof?color:'rgba(255,255,255,0.15)'}`,borderRadius:8,padding:'4px 7px',color:task.requiresProof?color:'rgba(255,255,255,0.3)',cursor:'pointer',fontSize:13,flexShrink:0}}>📷</button>}
 
       {/* ✕ delete */}
       <button onClick={()=>onDel(task.id)}
