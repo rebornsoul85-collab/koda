@@ -3,6 +3,11 @@ import { initializeApp } from "firebase/app";
 import { getDatabase, ref, set, get, onValue } from "firebase/database";
 
 /* ══════════════════════════════════════════
+   VERSION
+══════════════════════════════════════════ */
+const VERSION = 'v7';
+
+/* ══════════════════════════════════════════
    FIREBASE
 ══════════════════════════════════════════ */
 const firebaseConfig = {
@@ -16,24 +21,33 @@ const firebaseConfig = {
 };
 const db = getDatabase(initializeApp(firebaseConfig));
 const S = {
-  async get(k) { try { const s = await get(ref(db,k)); return s.exists() ? s.val() : null; } catch { return null; } },
-  async set(k,v) { try { await set(ref(db,k),v); } catch {} },
+  async get(k) {
+    try { const s = await get(ref(db,k)); return s.exists() ? s.val() : null; }
+    catch(e) { console.error('Firebase get error:', k, e); return null; }
+  },
+  async set(k,v) {
+    try { await set(ref(db,k),v); }
+    catch(e) { console.error('Firebase set error:', k, e); throw e; }
+  },
 };
 
 /* ══════════════════════════════════════════
    IMAGE COMPRESSION
+   600px max, 50% quality — keeps photos
+   well under Firebase's write limits
 ══════════════════════════════════════════ */
-const compressImage = (file) => new Promise((resolve) => {
+const compressImage = (file) => new Promise((resolve, reject) => {
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d');
   const img = new Image();
   img.onload = () => {
-    const ratio = Math.min(800/img.width, 800/img.height, 1);
-    canvas.width = Math.round(img.width * ratio);
+    const ratio = Math.min(600/img.width, 600/img.height, 1);
+    canvas.width  = Math.round(img.width  * ratio);
     canvas.height = Math.round(img.height * ratio);
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    resolve(canvas.toDataURL('image/jpeg', 0.6));
+    resolve(canvas.toDataURL('image/jpeg', 0.5));
   };
+  img.onerror = reject;
   img.src = URL.createObjectURL(file);
 });
 
@@ -156,7 +170,13 @@ export default function App() {
   const [goals,     setGoals]     = useState({ isabella:'', jocelyn:'' });
   const [rewards,   setRewards]   = useState(DEFAULT_REWARDS);
   const [rewardReqs,setRewardReqs]= useState([]);
+  const [toast,     setToast]     = useState('');
   const [loading,   setLoading]   = useState(true);
+
+  const showToast = (msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(''), 4000);
+  };
 
   useEffect(() => {
     if (!document.getElementById('koda-fonts')) {
@@ -202,9 +222,11 @@ export default function App() {
     listen('cm-b-isabella', v => setBal(p => ({...p, isabella: v ? parseInt(v) : 0})));
     listen('cm-b-jocelyn',  v => setBal(p => ({...p, jocelyn:  v ? parseInt(v) : 0})));
 
-    // Photo proofs
-    listen(`cm-proofs-isabella-${today}`, v => setProofs(p => ({...p, isabella: v ? JSON.parse(v) : {}})));
-    listen(`cm-proofs-jocelyn-${today}`,  v => setProofs(p => ({...p, jocelyn:  v ? JSON.parse(v) : {}})));
+    // Photo proofs — each proof is stored as its own node:
+    // cm-proofs/{user}/{date}/{taskId} = { photo, taskTitle, taskEmoji, submittedAt }
+    // This avoids writing one giant JSON blob and makes updates atomic.
+    listen(`cm-proofs/isabella/${today}`, v => setProofs(p => ({...p, isabella: v || {}})));
+    listen(`cm-proofs/jocelyn/${today}`,  v => setProofs(p => ({...p, jocelyn:  v || {}})));
 
     // Daily goals
     listen(`cm-goal-isabella-${today}`, v => setGoals(p => ({...p, isabella: v || ''})));
@@ -285,36 +307,42 @@ export default function App() {
     if (goalTask) await completeTask(user, goalTask.id);
   };
 
-  // Submit photo proof — goes to pending
+  // Submit photo proof — each proof stored as its own Firebase node
+  // Path: cm-proofs/{user}/{date}/{taskId}  ← no more giant JSON blobs
   const submitProof = async (user, taskId, photoBase64) => {
     const today = TODAY();
-    const task  = config.tasks[user].find(t => t.id === taskId);
-    const updated = { ...proofs[user], [taskId]: { photo: photoBase64, taskTitle: task?.title||'', taskEmoji: task?.emoji||'📸', submittedAt: new Date().toISOString() } };
-    setProofs(p => ({ ...p, [user]: updated }));
-    await S.set(`cm-proofs-${user}-${today}`, JSON.stringify(updated));
+    const task  = config?.tasks[user]?.find(t => t.id === taskId);
+    const data  = { photo: photoBase64, taskTitle: task?.title||'', taskEmoji: task?.emoji||'📸', submittedAt: new Date().toISOString() };
+    // Optimistic local update so kid sees "pending" immediately
+    setProofs(p => ({ ...p, [user]: { ...p[user], [taskId]: data } }));
+    try {
+      await set(ref(db, `cm-proofs/${user}/${today}/${taskId}`), data);
+    } catch(err) {
+      console.error('submitProof failed:', err);
+      // Revert local state
+      setProofs(p => { const u = {...p[user]}; delete u[taskId]; return {...p, [user]: u}; });
+      showToast('⚠️ Photo failed to send — please try again.');
+    }
   };
 
-  // Parent approves proof → task complete, stars earned, photo gone
+  // Parent approves proof → task complete, stars earned, proof node deleted
   const approveProof = async (user, taskId) => {
     const today = TODAY();
-    const task  = config.tasks[user].find(t => t.id === taskId);
+    const task    = config.tasks[user].find(t => t.id === taskId);
     const newComp = [...comp[user], taskId];
     const newBal  = bal[user] + (task?.minutes || 0);
     setComp(p => ({ ...p, [user]: newComp }));
     setBal(p  => ({ ...p, [user]: newBal  }));
     await S.set(`cm-c-${user}-${today}`, JSON.stringify(newComp));
     await S.set(`cm-b-${user}`, String(newBal));
-    const updated = { ...proofs[user] }; delete updated[taskId];
-    setProofs(p => ({ ...p, [user]: updated }));
-    await S.set(`cm-proofs-${user}-${today}`, JSON.stringify(updated));
+    // Delete proof by setting node to null (Firebase removes it)
+    await set(ref(db, `cm-proofs/${user}/${today}/${taskId}`), null);
   };
 
-  // Parent rejects proof → task back to incomplete, photo gone
+  // Parent rejects proof → proof node deleted, task stays incomplete
   const rejectProof = async (user, taskId) => {
     const today = TODAY();
-    const updated = { ...proofs[user] }; delete updated[taskId];
-    setProofs(p => ({ ...p, [user]: updated }));
-    await S.set(`cm-proofs-${user}-${today}`, JSON.stringify(updated));
+    await set(ref(db, `cm-proofs/${user}/${today}/${taskId}`), null);
   };
 
   const redeem = async (user, mins) => {
@@ -360,9 +388,9 @@ export default function App() {
 
   if (view==='landing')   return <Landing onSelect={t=>{setPinTarget(t);setView('pin');}}/>;
   if (view==='pin')       return <PinScreen target={pinTarget} config={config} onSuccess={()=>setView(pinTarget)} onBack={()=>setView('landing')}/>;
-  if (view==='parent')    return <ParentView config={config} saveConfig={saveConfig} comp={comp} bal={bal} proofs={proofs} goals={goals} rewards={rewards} rewardReqs={rewardReqs} redeem={redeem} approveProof={approveProof} rejectProof={rejectProof} toggleProofRequired={toggleProofRequired} reorderTask={reorderTask} updateTaskStars={updateTaskStars} saveRewards={saveRewards} approveRewardReq={approveRewardReq} denyRewardReq={denyRewardReq} logout={()=>setView('landing')}/>;
-  if (view==='isabella')  return <KidView user="isabella" theme="kawaii" tasks={config.tasks.isabella} comp={comp.isabella} proofs={proofs.isabella} goal={goals.isabella} rewards={rewards} rewardReqs={rewardReqs.filter(r=>r.user==='isabella')} bal={bal.isabella} onToggle={id=>toggleTask('isabella',id)} onComplete={id=>completeTask('isabella',id)} onSubmitProof={(id,p)=>submitProof('isabella',id,p)} onSetGoal={g=>submitGoal('isabella',g)} onRequestReward={r=>requestReward('isabella',r)} logout={()=>setView('landing')}/>;
-  if (view==='jocelyn')   return <KidView user="jocelyn"  theme="spidey" tasks={config.tasks.jocelyn}  comp={comp.jocelyn}  proofs={proofs.jocelyn}  goal={goals.jocelyn}  rewards={rewards} rewardReqs={rewardReqs.filter(r=>r.user==='jocelyn')}  bal={bal.jocelyn}  onToggle={id=>toggleTask('jocelyn',id)}  onComplete={id=>completeTask('jocelyn',id)}  onSubmitProof={(id,p)=>submitProof('jocelyn',id,p)}  onSetGoal={g=>submitGoal('jocelyn',g)}  onRequestReward={r=>requestReward('jocelyn',r)}  logout={()=>setView('landing')}/>;
+  if (view==='parent')    return <><ParentView config={config} saveConfig={saveConfig} comp={comp} bal={bal} proofs={proofs} goals={goals} rewards={rewards} rewardReqs={rewardReqs} redeem={redeem} approveProof={approveProof} rejectProof={rejectProof} toggleProofRequired={toggleProofRequired} reorderTask={reorderTask} updateTaskStars={updateTaskStars} saveRewards={saveRewards} approveRewardReq={approveRewardReq} denyRewardReq={denyRewardReq} logout={()=>setView('landing')}/>{toast&&<Toast msg={toast}/>}</>;
+  if (view==='isabella')  return <><KidView user="isabella" theme="kawaii" tasks={config.tasks.isabella} comp={comp.isabella} proofs={proofs.isabella} goal={goals.isabella} rewards={rewards} rewardReqs={rewardReqs.filter(r=>r.user==='isabella')} bal={bal.isabella} onToggle={id=>toggleTask('isabella',id)} onComplete={id=>completeTask('isabella',id)} onSubmitProof={(id,p)=>submitProof('isabella',id,p)} onSetGoal={g=>submitGoal('isabella',g)} onRequestReward={r=>requestReward('isabella',r)} logout={()=>setView('landing')}/>{toast&&<Toast msg={toast}/>}</>;
+  if (view==='jocelyn')   return <><KidView user="jocelyn"  theme="spidey" tasks={config.tasks.jocelyn}  comp={comp.jocelyn}  proofs={proofs.jocelyn}  goal={goals.jocelyn}  rewards={rewards} rewardReqs={rewardReqs.filter(r=>r.user==='jocelyn')}  bal={bal.jocelyn}  onToggle={id=>toggleTask('jocelyn',id)}  onComplete={id=>completeTask('jocelyn',id)}  onSubmitProof={(id,p)=>submitProof('jocelyn',id,p)}  onSetGoal={g=>submitGoal('jocelyn',g)}  onRequestReward={r=>requestReward('jocelyn',r)}  logout={()=>setView('landing')}/>{toast&&<Toast msg={toast}/>}</>;
   return null;
 }
 
@@ -384,7 +412,7 @@ function Landing({ onSelect }) {
         <LandingCard emoji="🕷️" name="Jossy" sub="Your web of tasks awaits 💅" bg="linear-gradient(135deg,#8b0000,#e91e63)" border="rgba(255,100,150,0.4)" glow="rgba(220,0,50,0.3)" webDeco onClick={()=>onSelect('jocelyn')}/>
       </div>
       <div style={{marginTop:20,padding:'8px 18px',background:'rgba(255,255,255,0.05)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:10,color:'rgba(255,255,255,0.3)',fontSize:11,position:'relative',zIndex:1,textAlign:'center'}}>
-        🌟 Koda &nbsp;·&nbsp; Default PINs: Parent 1234 · Isabella 1111 · Jossy 2222
+        🌟 Koda {VERSION} &nbsp;·&nbsp; Default PINs: Parent 1234 · Isabella 1111 · Jossy 2222
       </div>
     </div>
   );
@@ -494,7 +522,7 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,
     <div style={{minHeight:'100vh',background:'#0a0f1e',fontFamily:"'Nunito',sans-serif",color:'white'}}>
       <div style={{background:'linear-gradient(135deg,#0f2a4a,#1a3a6e)',padding:'20px 20px 0',borderBottom:'1px solid rgba(99,179,237,0.2)'}}>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
-          <div><div style={{fontWeight:900,fontSize:22}}>🌟 Koda</div><div style={{color:'rgba(255,255,255,0.4)',fontSize:12}}>Parent · Mission Control</div></div>
+          <div><div style={{fontWeight:900,fontSize:22}}>🌟 Koda</div><div style={{color:'rgba(255,255,255,0.4)',fontSize:12}}>Parent · Mission Control · <span style={{color:'rgba(255,255,255,0.25)'}}>{VERSION}</span></div></div>
           <button onClick={logout} style={{background:'rgba(255,255,255,0.08)',border:'1px solid rgba(255,255,255,0.15)',borderRadius:10,padding:'6px 14px',color:'rgba(255,255,255,0.65)',cursor:'pointer',fontSize:13,fontFamily:'inherit'}}>Sign Out</button>
         </div>
         <div style={{display:'flex',gap:2,overflowX:'auto'}}>
@@ -1115,6 +1143,22 @@ function TaskItem({task,done,pending,goal,isIsa,delay,onToggle,onComplete,onSubm
         <div style={{color:'rgba(255,255,255,0.4)',fontSize:11,marginTop:2,fontFamily:"'Nunito',sans-serif"}}>{task.recurring?'🔄 Every day':'📌 Special'} · 🌟 {task.minutes} min</div>
       </div>
     </div>
+  );
+}
+
+/* ══════════════════════════════════════════
+   TOAST NOTIFICATION
+══════════════════════════════════════════ */
+function Toast({ msg }) {
+  return (
+    <div style={{
+      position: 'fixed', bottom: 100, left: '50%', transform: 'translateX(-50%)',
+      background: msg.startsWith('⚠️') ? 'rgba(220,38,38,0.95)' : 'rgba(22,163,74,0.95)',
+      color: 'white', borderRadius: 14, padding: '12px 20px',
+      fontFamily: "'Nunito', sans-serif", fontWeight: 700, fontSize: 14,
+      zIndex: 999, boxShadow: '0 4px 24px rgba(0,0,0,0.4)',
+      whiteSpace: 'nowrap', animation: 'fadeInUp 0.3s ease',
+    }}>{msg}</div>
   );
 }
 
