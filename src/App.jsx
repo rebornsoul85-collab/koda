@@ -5,7 +5,7 @@ import { getDatabase, ref, set, get, onValue } from "firebase/database";
 /* ══════════════════════════════════════════
    VERSION
 ══════════════════════════════════════════ */
-const VERSION = 'v11.5';
+const VERSION = 'v12';
 
 /* ══════════════════════════════════════════
    FIREBASE
@@ -353,21 +353,36 @@ export default function App() {
     }
   };
 
-  // Parent approves proof → task complete, stars earned, proof node deleted
+  // Parent approves proof — BOTH parents must approve
+  // First parent: marks proof, task stays pending
+  // Second parent (different): completes task, earns stars, deletes proof
   const approveProof = async (user, taskId) => {
     const today = TODAY();
-    const task    = config.tasks[user].find(t => t.id === taskId);
-    const newComp = [...comp[user], taskId];
-    const newBal  = bal[user] + (task?.minutes || 0);
-    setComp(p => ({ ...p, [user]: newComp }));
-    setBal(p  => ({ ...p, [user]: newBal  }));
-    await S.set(`cm-c-${user}-${today}`, JSON.stringify(newComp));
-    await S.set(`cm-b-${user}`, String(newBal));
-    // Delete proof by setting node to null (Firebase removes it)
-    await set(ref(db, `cm-proofs/${user}/${today}/${taskId}`), null);
+    const proof = proofs[user]?.[taskId];
+    if (!proof) return;
+    if (proof.firstApprovalBy === currentParent) {
+      showToast('You already approved this one!');
+      return;
+    }
+    if (!proof.firstApprovalBy) {
+      // First approval — update proof, wait for second parent
+      await set(ref(db, `cm-proofs/${user}/${today}/${taskId}`), {
+        ...proof, firstApprovalBy: currentParent, firstApprovedAt: new Date().toISOString(),
+      });
+    } else {
+      // Second approval from other parent — complete task
+      const task    = config.tasks[user].find(t => t.id === taskId);
+      const newComp = [...comp[user], taskId];
+      const newBal  = bal[user] + (task?.minutes || 0);
+      setComp(p => ({ ...p, [user]: newComp }));
+      setBal(p  => ({ ...p, [user]: newBal  }));
+      await S.set(`cm-c-${user}-${today}`, JSON.stringify(newComp));
+      await S.set(`cm-b-${user}`, String(newBal));
+      await set(ref(db, `cm-proofs/${user}/${today}/${taskId}`), null);
+    }
   };
 
-  // Parent rejects proof → proof node deleted, task stays incomplete
+  // Parent rejects proof — instant veto, one parent is enough
   const rejectProof = async (user, taskId) => {
     const today = TODAY();
     await set(ref(db, `cm-proofs/${user}/${today}/${taskId}`), null);
@@ -393,21 +408,39 @@ export default function App() {
     await S.set('cm-reward-requests', JSON.stringify(updated));
   };
 
-  // Parent approves reward — deduct stars, resolve request, log activity
+  // Parent approves reward — BOTH parents must approve
+  // First parent: marks request as first_approved
+  // Second parent (different): fully approves, deducts stars, logs activity
   const approveRewardReq = async (reqId, note) => {
     const req = rewardReqs.find(r => r.id === reqId);
     if (!req) return;
-    const newBal = Math.max(0, bal[req.user] - req.stars);
-    setBal(p => ({ ...p, [req.user]: newBal }));
-    await S.set(`cm-b-${req.user}`, String(newBal));
-    const updatedReqs = rewardReqs.map(r => r.id === reqId
-      ? { ...r, status: 'approved', resolvedBy: currentParent, resolvedAt: new Date().toISOString(), note: note || '' }
-      : r);
-    setRewardReqs(updatedReqs);
-    await S.set('cm-reward-requests', JSON.stringify(updatedReqs));
-    const newActivity = [{ id: uid(), type: 'approved', by: currentParent, user: req.user, rewardTitle: req.rewardTitle, rewardEmoji: req.rewardEmoji, stars: req.stars, note: note || '', timestamp: new Date().toISOString() }, ...activity].slice(0, 50);
-    setActivity(newActivity);
-    await S.set('cm-activity', JSON.stringify(newActivity));
+    const approvals = req.approvals || [];
+    if (approvals.includes(currentParent)) {
+      showToast('You already approved this one!');
+      return;
+    }
+    const newApprovals = [...approvals, currentParent];
+    if (newApprovals.length >= 2) {
+      // Both parents approved — fully grant it
+      const newBal = Math.max(0, bal[req.user] - req.stars);
+      setBal(p => ({ ...p, [req.user]: newBal }));
+      await S.set(`cm-b-${req.user}`, String(newBal));
+      const updatedReqs = rewardReqs.map(r => r.id === reqId
+        ? { ...r, approvals: newApprovals, status: 'approved', resolvedBy: `${req.firstApprovalBy} & ${currentParent}`, resolvedAt: new Date().toISOString(), note: note || req.firstNote || '' }
+        : r);
+      setRewardReqs(updatedReqs);
+      await S.set('cm-reward-requests', JSON.stringify(updatedReqs));
+      const newActivity = [{ id: uid(), type: 'approved', by: `${req.firstApprovalBy} & ${currentParent}`, user: req.user, rewardTitle: req.rewardTitle, rewardEmoji: req.rewardEmoji, stars: req.stars, note: note || req.firstNote || '', timestamp: new Date().toISOString() }, ...activity].slice(0, 50);
+      setActivity(newActivity);
+      await S.set('cm-activity', JSON.stringify(newActivity));
+    } else {
+      // First approval — waiting for the other parent
+      const updatedReqs = rewardReqs.map(r => r.id === reqId
+        ? { ...r, approvals: newApprovals, status: 'first_approved', firstApprovalBy: currentParent, firstApprovalAt: new Date().toISOString(), firstNote: note || '' }
+        : r);
+      setRewardReqs(updatedReqs);
+      await S.set('cm-reward-requests', JSON.stringify(updatedReqs));
+    }
   };
 
   // Parent denies reward — no star change, resolve request, log activity
@@ -585,8 +618,8 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,
       <div style={{padding:'20px',maxWidth:580,margin:'0 auto'}}>
 
         {tab==='overview'&&<ParentOverview comp={comp} bal={bal} proofs={proofs} goals={goals} config={config} rewardReqs={rewardReqs} onShowProof={()=>setTab('proof')} onShowRewards={()=>setTab('rewards')}/>}
-        {tab==='proof'&&<ProofInbox proofs={proofs} config={config} onApprove={approveProof} onReject={rejectProof}/>}
-        {tab==='rewards'&&<RewardRequests rewardReqs={rewardReqs} bal={bal} onApprove={approveRewardReq} onDeny={denyRewardReq}/>}
+        {tab==='proof'&&<ProofInbox proofs={proofs} config={config} onApprove={approveProof} onReject={rejectProof} parentName={parentName}/>}
+        {tab==='rewards'&&<RewardRequests rewardReqs={rewardReqs} bal={bal} onApprove={approveRewardReq} onDeny={denyRewardReq} parentName={parentName}/>}
         {tab==='activity'&&<ActivityLog activity={activity}/>}
         {tab==='store'&&<ManageRewards rewards={rewards} saveRewards={saveRewards}/>}
 
@@ -633,8 +666,8 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,
 }
 
 function ParentOverview({comp,bal,proofs,goals,config,rewardReqs,onShowProof,onShowRewards}) {
-  const pendingProofs=Object.keys(proofs.isabella||{}).length+Object.keys(proofs.jocelyn||{}).length;
-  const pendingRewards=rewardReqs.filter(r=>r.status==='pending'||(r.status===undefined)).length;
+  const pendingProofs  = Object.keys(proofs.isabella||{}).length+Object.keys(proofs.jocelyn||{}).length;
+  const pendingRewards = rewardReqs.filter(r=>r.status==='pending'||r.status==='first_approved'||(r.status===undefined)).length;
   return(
     <>
       <h2 style={{fontWeight:800,fontSize:20,marginBottom:16}}>📊 Today&apos;s Overview</h2>
@@ -679,11 +712,12 @@ function ParentOverview({comp,bal,proofs,goals,config,rewardReqs,onShowProof,onS
           </div>
         </div>
       )}
+      <RewardQueue rewardReqs={rewardReqs} isParent={true}/>
     </>
   );
 }
 
-function ProofInbox({proofs,config,onApprove,onReject}) {
+function ProofInbox({proofs,config,onApprove,onReject,parentName}) {
   const all=[];
   ['isabella','jocelyn'].forEach(user=>Object.entries(proofs[user]||{}).forEach(([taskId,proof])=>all.push({user,taskId,...proof})));
   if(all.length===0)return(
@@ -693,15 +727,19 @@ function ProofInbox({proofs,config,onApprove,onReject}) {
       <div style={{color:'rgba(255,255,255,0.3)',fontSize:13,marginTop:6}}>When the girls submit proof, it&apos;ll show up here.</div>
     </div>
   );
+  const otherParent = parentName==='Mom' ? 'Dad' : 'Mom';
   return(
     <div>
       <h2 style={{fontWeight:800,fontSize:20,marginBottom:6}}>📸 Proof Inbox</h2>
-      <p style={{color:'rgba(255,255,255,0.4)',fontSize:13,marginBottom:20}}>{all.length} photo{all.length>1?'s':''} waiting for review</p>
+      <p style={{color:'rgba(255,255,255,0.4)',fontSize:13,marginBottom:4}}>{all.length} photo{all.length>1?'s':''} waiting · <span style={{color:'#fbbf24'}}>Both parents must approve</span></p>
+      <p style={{color:'rgba(255,255,255,0.3)',fontSize:12,marginBottom:20}}>Deny = instant rejection (one veto is enough)</p>
       {all.map((proof,i)=>{
         const isIsa=proof.user==='isabella';
         const color=isIsa?'#f107a3':'#e91e63';
         const name=isIsa?'🌸 Isabella':'🕷️ Jossy';
         const time=new Date(proof.submittedAt).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
+        const alreadyApproved = proof.firstApprovalBy===parentName;
+        const firstApprovedBy = proof.firstApprovalBy;
         return(
           <div key={`${proof.user}-${proof.taskId}-${i}`} style={{background:'rgba(255,255,255,0.04)',border:`1px solid ${color}40`,borderRadius:18,overflow:'hidden',marginBottom:16}}>
             <div style={{position:'relative'}}>
@@ -710,14 +748,26 @@ function ProofInbox({proofs,config,onApprove,onReject}) {
               <div style={{position:'absolute',top:10,right:10,background:'rgba(0,0,0,0.6)',borderRadius:20,padding:'4px 12px',fontSize:12,color:'rgba(255,255,255,0.7)'}}>{time}</div>
             </div>
             <div style={{padding:'14px 16px'}}>
-              <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:14}}>
+              <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
                 <span style={{fontSize:22}}>{proof.taskEmoji}</span>
                 <span style={{fontWeight:700,fontSize:15}}>{proof.taskTitle}</span>
               </div>
-              <div style={{display:'flex',gap:10}}>
-                <button onClick={()=>onApprove(proof.user,proof.taskId)} style={{flex:1,background:'rgba(74,222,128,0.15)',border:'1.5px solid rgba(74,222,128,0.4)',borderRadius:12,padding:'10px',color:'#4ade80',fontWeight:700,cursor:'pointer',fontSize:14,fontFamily:'inherit'}}>✅ Approve</button>
-                <button onClick={()=>onReject(proof.user,proof.taskId)} style={{flex:1,background:'rgba(239,68,68,0.12)',border:'1.5px solid rgba(239,68,68,0.3)',borderRadius:12,padding:'10px',color:'#f87171',fontWeight:700,cursor:'pointer',fontSize:14,fontFamily:'inherit'}}>❌ Reject</button>
+              {/* Dual approval status */}
+              <div style={{background:'rgba(255,255,255,0.05)',borderRadius:10,padding:'8px 12px',marginBottom:12,fontSize:12}}>
+                {firstApprovedBy
+                  ? <span style={{color:'#4ade80'}}>✅ {firstApprovedBy} approved · waiting for {firstApprovedBy==='Mom'?'Dad':'Mom'}</span>
+                  : <span style={{color:'rgba(255,255,255,0.5)'}}>⏳ Waiting for both parents</span>}
               </div>
+              {alreadyApproved
+                ? <div style={{textAlign:'center',color:'#4ade80',fontWeight:700,padding:'8px',fontSize:14}}>✅ You approved this — waiting for {otherParent}</div>
+                : (
+                  <div style={{display:'flex',gap:10}}>
+                    <button onClick={()=>onApprove(proof.user,proof.taskId)} style={{flex:1,background:'rgba(74,222,128,0.15)',border:'1.5px solid rgba(74,222,128,0.4)',borderRadius:12,padding:'10px',color:'#4ade80',fontWeight:700,cursor:'pointer',fontSize:14,fontFamily:'inherit'}}>
+                      {firstApprovedBy ? `✅ Confirm (${otherParent})` : '✅ Approve'}
+                    </button>
+                    <button onClick={()=>onReject(proof.user,proof.taskId)} style={{flex:1,background:'rgba(239,68,68,0.12)',border:'1.5px solid rgba(239,68,68,0.3)',borderRadius:12,padding:'10px',color:'#f87171',fontWeight:700,cursor:'pointer',fontSize:14,fontFamily:'inherit'}}>❌ Reject</button>
+                  </div>
+                )}
             </div>
           </div>
         );
@@ -1237,10 +1287,11 @@ function SakuraDecor() {
 /* ══════════════════════════════════════════
    REWARD REQUESTS  (parent view)
 ══════════════════════════════════════════ */
-function RewardRequests({rewardReqs,bal,onApprove,onDeny}) {
+function RewardRequests({rewardReqs,bal,onApprove,onDeny,parentName}) {
   const [active,setActive]=useState(null);
   const [note,setNote]=useState('');
-  const pending=rewardReqs.filter(r=>r.status==='pending'||(r.status===undefined));
+  const otherParent=parentName==='Mom'?'Dad':'Mom';
+  const pending=rewardReqs.filter(r=>!r.status||r.status==='pending'||r.status==='first_approved');
   const startAction=(id,action)=>{setActive({id,action});setNote('');};
   const cancel=()=>{setActive(null);setNote('');};
   const confirm=()=>{
@@ -1259,7 +1310,8 @@ function RewardRequests({rewardReqs,bal,onApprove,onDeny}) {
   return(
     <div>
       <h2 style={{fontWeight:800,fontSize:20,marginBottom:6}}>🎁 Reward Requests</h2>
-      <p style={{color:'rgba(255,255,255,0.4)',fontSize:13,marginBottom:20}}>{pending.length} request{pending.length>1?'s':''} waiting</p>
+      <p style={{color:'rgba(255,255,255,0.4)',fontSize:13,marginBottom:4}}>{pending.length} request{pending.length>1?'s':''} · <span style={{color:'#fbbf24'}}>Both parents must approve</span></p>
+      <p style={{color:'rgba(255,255,255,0.3)',fontSize:12,marginBottom:20}}>Deny = instant rejection</p>
       {pending.map(req=>{
         const isIsa=req.user==='isabella';
         const color=isIsa?'#f107a3':'#e91e63';
@@ -1267,25 +1319,30 @@ function RewardRequests({rewardReqs,bal,onApprove,onDeny}) {
         const userBal=bal[req.user];
         const time=new Date(req.requestedAt).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
         const isActiveReq=active?.id===req.id;
+        const alreadyApproved=(req.approvals||[]).includes(parentName);
+        const firstApprovalBy=req.firstApprovalBy;
         return(
           <div key={req.id} style={{background:'rgba(255,255,255,0.04)',border:`1px solid ${color}40`,borderRadius:18,padding:20,marginBottom:14}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
               <span style={{fontWeight:700,fontSize:16,color}}>{name}</span>
               <span style={{color:'rgba(255,255,255,0.35)',fontSize:12}}>{time}</span>
             </div>
-            <div style={{display:'flex',alignItems:'center',gap:12,background:'rgba(255,255,255,0.05)',borderRadius:14,padding:'12px 14px',marginBottom:12}}>
+            <div style={{display:'flex',alignItems:'center',gap:12,background:'rgba(255,255,255,0.05)',borderRadius:14,padding:'12px 14px',marginBottom:10}}>
               <span style={{fontSize:32}}>{req.rewardEmoji}</span>
               <div style={{flex:1}}>
                 <div style={{fontWeight:700,fontSize:16,color:'white'}}>{req.rewardTitle}</div>
-                <div style={{fontSize:13,color:'rgba(255,255,255,0.5)',marginTop:2}}>🌟 {req.stars} stars · Balance: <span style={{color:'#ffd700',fontWeight:700}}>{userBal} stars</span></div>
+                <div style={{fontSize:13,color:'rgba(255,255,255,0.5)',marginTop:2}}>🌟 {req.stars} stars · Balance: <span style={{color:'#ffd700',fontWeight:700}}>{userBal}</span></div>
               </div>
+            </div>
+            <div style={{background:'rgba(255,255,255,0.05)',borderRadius:10,padding:'8px 12px',marginBottom:12,fontSize:12}}>
+              {firstApprovalBy?<span style={{color:'#4ade80'}}>✅ {firstApprovalBy} approved · waiting for {firstApprovalBy==='Mom'?'Dad':'Mom'}</span>:<span style={{color:'rgba(255,255,255,0.5)'}}>⏳ Waiting for both parents</span>}
             </div>
             {isActiveReq?(
               <div>
                 <div style={{color:'rgba(255,255,255,0.6)',fontSize:13,marginBottom:6}}>
-                  {active.action==='deny'?'❌ Reason for denying (required — she will see this):':'✅ Leave a note for her (optional):'}
+                  {active.action==='deny'?'❌ Reason for denying (required):':'✅ Leave a note (optional):'}
                 </div>
-                <textarea autoFocus placeholder={active.action==='deny'?'e.g. "Finish homework first" or "Ask again on Friday"':'e.g. "Great job this week! Enjoy!" (or leave blank)'} value={note} onChange={e=>setNote(e.target.value)} rows={3} style={{width:'100%',background:'rgba(255,255,255,0.07)',border:`1px solid ${active.action==='deny'?'rgba(239,68,68,0.4)':'rgba(74,222,128,0.4)'}`,borderRadius:12,padding:'10px 14px',color:'white',fontSize:14,fontFamily:'inherit',outline:'none',resize:'none',marginBottom:10}}/>
+                <textarea autoFocus placeholder={active.action==='deny'?'e.g. "Finish homework first"':' e.g. "Great job this week!"'} value={note} onChange={e=>setNote(e.target.value)} rows={3} style={{width:'100%',background:'rgba(255,255,255,0.07)',border:`1px solid ${active.action==='deny'?'rgba(239,68,68,0.4)':'rgba(74,222,128,0.4)'}`,borderRadius:12,padding:'10px 14px',color:'white',fontSize:14,fontFamily:'inherit',outline:'none',resize:'none',marginBottom:10}}/>
                 <div style={{display:'flex',gap:8}}>
                   <button onClick={confirm} disabled={active.action==='deny'&&!note.trim()} style={{flex:1,background:active.action==='approve'?'rgba(74,222,128,0.15)':'rgba(239,68,68,0.15)',border:`1.5px solid ${active.action==='approve'?'rgba(74,222,128,0.4)':'rgba(239,68,68,0.4)'}`,borderRadius:12,padding:'10px',color:active.action==='approve'?'#4ade80':'#f87171',fontWeight:700,cursor:active.action==='deny'&&!note.trim()?'default':'pointer',fontSize:14,fontFamily:'inherit',opacity:active.action==='deny'&&!note.trim()?0.4:1}}>
                     {active.action==='approve'?'✅ Confirm Approval':'❌ Confirm Denial'}
@@ -1293,10 +1350,15 @@ function RewardRequests({rewardReqs,bal,onApprove,onDeny}) {
                   <button onClick={cancel} style={{background:'rgba(255,255,255,0.08)',border:'1px solid rgba(255,255,255,0.15)',borderRadius:12,padding:'10px 16px',color:'rgba(255,255,255,0.6)',cursor:'pointer',fontFamily:'inherit'}}>Cancel</button>
                 </div>
               </div>
+            ):alreadyApproved?(
+              <div style={{textAlign:'center',color:'#4ade80',fontWeight:700,padding:'8px',fontSize:14}}>
+                ✅ You approved — waiting for {otherParent}
+                <div style={{marginTop:8}}><button onClick={()=>startAction(req.id,'deny')} style={{background:'rgba(239,68,68,0.12)',border:'1.5px solid rgba(239,68,68,0.3)',borderRadius:12,padding:'8px 16px',color:'#f87171',fontWeight:700,cursor:'pointer',fontSize:13,fontFamily:'inherit'}}>❌ Actually Deny</button></div>
+              </div>
             ):(
               <div style={{display:'flex',gap:10}}>
-                <button onClick={()=>startAction(req.id,'approve')} style={{flex:1,background:'rgba(74,222,128,0.15)',border:'1.5px solid rgba(74,222,128,0.4)',borderRadius:12,padding:'10px',color:'#4ade80',fontWeight:700,cursor:'pointer',fontSize:14,fontFamily:'inherit'}}>✅ Approve</button>
-                <button onClick={()=>startAction(req.id,'deny')}    style={{flex:1,background:'rgba(239,68,68,0.12)',border:'1.5px solid rgba(239,68,68,0.3)',borderRadius:12,padding:'10px',color:'#f87171',fontWeight:700,cursor:'pointer',fontSize:14,fontFamily:'inherit'}}>❌ Deny</button>
+                <button onClick={()=>startAction(req.id,'approve')} style={{flex:1,background:'rgba(74,222,128,0.15)',border:'1.5px solid rgba(74,222,128,0.4)',borderRadius:12,padding:'10px',color:'#4ade80',fontWeight:700,cursor:'pointer',fontSize:14,fontFamily:'inherit'}}>{firstApprovalBy?`✅ Confirm (${parentName})`:"✅ Approve"}</button>
+                <button onClick={()=>startAction(req.id,'deny')} style={{flex:1,background:'rgba(239,68,68,0.12)',border:'1.5px solid rgba(239,68,68,0.3)',borderRadius:12,padding:'10px',color:'#f87171',fontWeight:700,cursor:'pointer',fontSize:14,fontFamily:'inherit'}}>❌ Deny</button>
               </div>
             )}
           </div>
@@ -1306,9 +1368,59 @@ function RewardRequests({rewardReqs,bal,onApprove,onDeny}) {
   );
 }
 
+
 /* ══════════════════════════════════════════
    ACTIVITY LOG  (parent view)
 ══════════════════════════════════════════ */
+/* ══════════════════════════════════════════
+   REWARD QUEUE  — today's reward activity
+   Visible to parents (Overview) and kids (Store)
+   Resets automatically each new day
+══════════════════════════════════════════ */
+function RewardQueue({rewardReqs, isParent}) {
+  const today = TODAY();
+  // Show requests from today only
+  const todayReqs = rewardReqs.filter(r => r.requestedAt?.startsWith(today) || r.resolvedAt?.startsWith(today));
+  if (todayReqs.length === 0) return null;
+
+  const pending     = todayReqs.filter(r => !r.status || r.status==='pending');
+  const partial     = todayReqs.filter(r => r.status==='first_approved');
+  const approved    = todayReqs.filter(r => r.status==='approved');
+  const denied      = todayReqs.filter(r => r.status==='denied');
+
+  const statusChip = (r) => {
+    if(r.status==='approved')    return {label:'✅ Approved', color:'#4ade80', bg:'rgba(74,222,128,0.12)'};
+    if(r.status==='denied')      return {label:'❌ Denied',   color:'#f87171', bg:'rgba(239,68,68,0.12)'};
+    if(r.status==='first_approved') return {label:`⏳ ${r.firstApprovalBy} approved`, color:'#fbbf24', bg:'rgba(251,191,36,0.12)'};
+    return {label:'⏳ Pending', color:'rgba(255,255,255,0.5)', bg:'rgba(255,255,255,0.06)'};
+  };
+
+  return(
+    <div style={{marginTop: isParent ? 16 : 24}}>
+      <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:800,fontSize:14,color:'rgba(255,255,255,0.6)',marginBottom:12,letterSpacing:0.5,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+        <span>📅 TODAY&apos;S REWARD QUEUE</span>
+        <span style={{fontSize:11,color:'rgba(255,255,255,0.3)',fontWeight:400}}>resets tomorrow</span>
+      </div>
+      {todayReqs.map(r => {
+        const chip = statusChip(r);
+        const isIsa = r.user==='isabella';
+        const userName = isIsa ? '🌸 Isabella' : '🕷️ Jossy';
+        return(
+          <div key={r.id} style={{display:'flex',alignItems:'center',gap:10,background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.07)',borderRadius:14,padding:'10px 14px',marginBottom:8}}>
+            <span style={{fontSize:24,flexShrink:0}}>{r.rewardEmoji}</span>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:700,fontSize:13,color:'white',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.rewardTitle}</div>
+              {isParent && <div style={{fontFamily:"'Nunito',sans-serif",fontSize:11,color:'rgba(255,255,255,0.4)',marginTop:1}}>{userName} · 🌟 {r.stars} stars</div>}
+              {r.note && r.status==='denied' && <div style={{fontFamily:"'Nunito',sans-serif",fontSize:11,color:'rgba(255,150,150,0.7)',fontStyle:'italic',marginTop:2}}>"{r.note}"</div>}
+            </div>
+            <div style={{background:chip.bg,borderRadius:20,padding:'3px 10px',color:chip.color,fontSize:11,fontWeight:700,fontFamily:"'Nunito',sans-serif",whiteSpace:'nowrap',flexShrink:0}}>{chip.label}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function ActivityLog({activity}) {
   if(!activity||activity.length===0) return(
     <div style={{textAlign:'center',padding:'60px 20px'}}>
