@@ -5,7 +5,7 @@ import { getDatabase, ref, set, get, onValue } from "firebase/database";
 /* ══════════════════════════════════════════
    VERSION
 ══════════════════════════════════════════ */
-const VERSION = 'v7';
+const VERSION = 'v8';
 
 /* ══════════════════════════════════════════
    FIREBASE
@@ -171,6 +171,7 @@ export default function App() {
   const [rewards,   setRewards]   = useState(DEFAULT_REWARDS);
   const [rewardReqs,setRewardReqs]= useState([]);
   const [toast,     setToast]     = useState('');
+  const [fbStatus,  setFbStatus]  = useState('checking'); // 'checking' | 'ok' | error string
   const [loading,   setLoading]   = useState(true);
 
   const showToast = (msg) => {
@@ -200,6 +201,17 @@ export default function App() {
       setLoading(false);
     };
     loadStatic();
+
+    // ── Firebase connection test ──────────────────────────────────
+    // Write a tiny test value so we know Firebase is reachable.
+    // Shows status in parent dashboard for easy diagnosis.
+    set(ref(db, 'cm-connection-test'), new Date().toISOString())
+      .then(() => setFbStatus('ok'))
+      .catch(err => {
+        const msg = err?.code || err?.message || 'unknown error';
+        console.error('Firebase connection failed:', msg);
+        setFbStatus(msg);
+      });
 
     // ── Real-time listeners for all dynamic data ──────────────────
     // These fire immediately with current data AND whenever it changes,
@@ -318,10 +330,11 @@ export default function App() {
     try {
       await set(ref(db, `cm-proofs/${user}/${today}/${taskId}`), data);
     } catch(err) {
-      console.error('submitProof failed:', err);
+      const errMsg = err?.code || err?.message || 'unknown';
+      console.error('submitProof failed:', errMsg);
       // Revert local state
       setProofs(p => { const u = {...p[user]}; delete u[taskId]; return {...p, [user]: u}; });
-      showToast('⚠️ Photo failed to send — please try again.');
+      showToast(`⚠️ Firebase error: ${errMsg}`);
     }
   };
 
@@ -388,7 +401,7 @@ export default function App() {
 
   if (view==='landing')   return <Landing onSelect={t=>{setPinTarget(t);setView('pin');}}/>;
   if (view==='pin')       return <PinScreen target={pinTarget} config={config} onSuccess={()=>setView(pinTarget)} onBack={()=>setView('landing')}/>;
-  if (view==='parent')    return <><ParentView config={config} saveConfig={saveConfig} comp={comp} bal={bal} proofs={proofs} goals={goals} rewards={rewards} rewardReqs={rewardReqs} redeem={redeem} approveProof={approveProof} rejectProof={rejectProof} toggleProofRequired={toggleProofRequired} reorderTask={reorderTask} updateTaskStars={updateTaskStars} saveRewards={saveRewards} approveRewardReq={approveRewardReq} denyRewardReq={denyRewardReq} logout={()=>setView('landing')}/>{toast&&<Toast msg={toast}/>}</>;
+  if (view==='parent')    return <><ParentView config={config} saveConfig={saveConfig} comp={comp} bal={bal} proofs={proofs} goals={goals} rewards={rewards} rewardReqs={rewardReqs} redeem={redeem} approveProof={approveProof} rejectProof={rejectProof} toggleProofRequired={toggleProofRequired} reorderTask={reorderTask} updateTaskStars={updateTaskStars} saveRewards={saveRewards} approveRewardReq={approveRewardReq} denyRewardReq={denyRewardReq} fbStatus={fbStatus} logout={()=>setView('landing')}/>{toast&&<Toast msg={toast}/>}</>;
   if (view==='isabella')  return <><KidView user="isabella" theme="kawaii" tasks={config.tasks.isabella} comp={comp.isabella} proofs={proofs.isabella} goal={goals.isabella} rewards={rewards} rewardReqs={rewardReqs.filter(r=>r.user==='isabella')} bal={bal.isabella} onToggle={id=>toggleTask('isabella',id)} onComplete={id=>completeTask('isabella',id)} onSubmitProof={(id,p)=>submitProof('isabella',id,p)} onSetGoal={g=>submitGoal('isabella',g)} onRequestReward={r=>requestReward('isabella',r)} logout={()=>setView('landing')}/>{toast&&<Toast msg={toast}/>}</>;
   if (view==='jocelyn')   return <><KidView user="jocelyn"  theme="spidey" tasks={config.tasks.jocelyn}  comp={comp.jocelyn}  proofs={proofs.jocelyn}  goal={goals.jocelyn}  rewards={rewards} rewardReqs={rewardReqs.filter(r=>r.user==='jocelyn')}  bal={bal.jocelyn}  onToggle={id=>toggleTask('jocelyn',id)}  onComplete={id=>completeTask('jocelyn',id)}  onSubmitProof={(id,p)=>submitProof('jocelyn',id,p)}  onSetGoal={g=>submitGoal('jocelyn',g)}  onRequestReward={r=>requestReward('jocelyn',r)}  logout={()=>setView('landing')}/>{toast&&<Toast msg={toast}/>}</>;
   return null;
@@ -484,7 +497,7 @@ function PinScreen({target,config,onSuccess,onBack}) {
 /* ══════════════════════════════════════════
    PARENT DASHBOARD
 ══════════════════════════════════════════ */
-function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,redeem,approveProof,rejectProof,toggleProofRequired,reorderTask,updateTaskStars,saveRewards,approveRewardReq,denyRewardReq,logout}) {
+function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,redeem,approveProof,rejectProof,toggleProofRequired,reorderTask,updateTaskStars,saveRewards,approveRewardReq,denyRewardReq,fbStatus,logout}) {
   const [tab,setTab]=useState('overview');
   const [addFor,setAddFor]=useState(null);
   const [newTask,setNewTask]=useState({title:'',emoji:'⭐',recurring:true,minutes:15,requiresProof:false,timeOfDay:'morning'});
@@ -523,7 +536,12 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,
       <div style={{background:'linear-gradient(135deg,#0f2a4a,#1a3a6e)',padding:'20px 20px 0',borderBottom:'1px solid rgba(99,179,237,0.2)'}}>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
           <div><div style={{fontWeight:900,fontSize:22}}>🌟 Koda</div><div style={{color:'rgba(255,255,255,0.4)',fontSize:12}}>Parent · Mission Control · <span style={{color:'rgba(255,255,255,0.25)'}}>{VERSION}</span></div></div>
-          <button onClick={logout} style={{background:'rgba(255,255,255,0.08)',border:'1px solid rgba(255,255,255,0.15)',borderRadius:10,padding:'6px 14px',color:'rgba(255,255,255,0.65)',cursor:'pointer',fontSize:13,fontFamily:'inherit'}}>Sign Out</button>
+          <div style={{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:4}}>
+            <button onClick={logout} style={{background:'rgba(255,255,255,0.08)',border:'1px solid rgba(255,255,255,0.15)',borderRadius:10,padding:'6px 14px',color:'rgba(255,255,255,0.65)',cursor:'pointer',fontSize:13,fontFamily:'inherit'}}>Sign Out</button>
+            <div style={{fontSize:11,color:fbStatus==='ok'?'#4ade80':fbStatus==='checking'?'rgba(255,255,255,0.4)':'#f87171'}}>
+              {fbStatus==='ok'?'🟢 Firebase connected':fbStatus==='checking'?'⏳ Connecting…':`🔴 ${fbStatus}`}
+            </div>
+          </div>
         </div>
         <div style={{display:'flex',gap:2,overflowX:'auto'}}>
           {TABS.map(t=>(
