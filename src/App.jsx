@@ -5,7 +5,7 @@ import { getDatabase, ref, set, get, onValue } from "firebase/database";
 /* ══════════════════════════════════════════
    VERSION
 ══════════════════════════════════════════ */
-const VERSION = 'v11';
+const VERSION = 'v11.1';
 
 /* ══════════════════════════════════════════
    FIREBASE
