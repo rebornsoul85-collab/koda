@@ -5,7 +5,7 @@ import { getDatabase, ref, set, get, onValue } from "firebase/database";
 /* ══════════════════════════════════════════
    VERSION
 ══════════════════════════════════════════ */
-const VERSION = 'v13';
+const VERSION = 'v15';
 
 /* ══════════════════════════════════════════
    FIREBASE
@@ -210,8 +210,42 @@ export default function App() {
         cfg.pins.mom = cfg.pins.parent;
         cfg.pins.dad = '5678';
         delete cfg.pins.parent;
-        await S.set('cm-config', JSON.stringify(cfg));
       }
+
+      // ── Daily cleanup ──────────────────────────────────────────
+      // 1. Remove non-recurring tasks whose createdDate is before today
+      let changed = false;
+      ['isabella','jocelyn'].forEach(user => {
+        const filtered = (cfg.tasks[user] || []).filter(t => {
+          if (t.recurring) return true; // keep all recurring tasks
+          if (!t.createdDate) return true; // legacy tasks with no date — keep
+          return t.createdDate === today; // only show one-time tasks from today
+        });
+        if (filtered.length !== (cfg.tasks[user] || []).length) {
+          cfg.tasks[user] = filtered;
+          changed = true;
+        }
+      });
+
+      // 2. Clear reward requests — keep pending/first_approved (still need action)
+      //    and remove resolved ones from previous days
+      const rawReqs = await S.get('cm-reward-requests');
+      if (rawReqs) {
+        const reqs = JSON.parse(rawReqs);
+        const cleaned = reqs.filter(r => {
+          // Always keep pending requests
+          if (!r.status || r.status === 'pending' || r.status === 'first_approved') return true;
+          // Keep resolved requests only from today
+          const resolvedDate = r.resolvedAt?.slice(0, 10);
+          const requestedDate = r.requestedAt?.slice(0, 10);
+          return resolvedDate === today || requestedDate === today;
+        });
+        if (cleaned.length !== reqs.length) {
+          await S.set('cm-reward-requests', JSON.stringify(cleaned));
+        }
+      }
+
+      if (changed) await S.set('cm-config', JSON.stringify(cfg));
       setConfig(cfg);
       setRewards(rawRwds ? JSON.parse(rawRwds) : DEFAULT_REWARDS);
       setActivity(rawAct ? JSON.parse(rawAct) : []);
@@ -627,7 +661,10 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,
 
   const addTask=user=>{
     if(!newTask.title.trim())return;
-    saveConfig({...config,tasks:{...config.tasks,[user]:[...config.tasks[user],{id:uid(),...newTask}]}});
+    const task = { id:uid(), ...newTask };
+    // Non-recurring tasks get a creation date so they disappear tomorrow
+    if (!task.recurring) task.createdDate = TODAY();
+    saveConfig({...config,tasks:{...config.tasks,[user]:[...config.tasks[user],task]}});
     setNewTask({title:'',emoji:'⭐',recurring:true,minutes:15,requiresProof:false,timeOfDay:'morning'});
     setAddFor(null);setShowEmoji(false);
   };
@@ -707,6 +744,9 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,
         {tab==='settings'&&<>
           <h2 style={{fontWeight:800,fontSize:20,marginBottom:6}}>⚙️ Settings</h2>
 
+          {/* ── Backup & Restore ── */}
+          <BackupRestore config={config} avatars={avatars} bal={bal} alltime={alltime}/>
+
           {/* Avatar upload */}
           <div style={{marginBottom:24}}>
             <div style={{fontWeight:700,fontSize:15,marginBottom:12,color:'rgba(255,255,255,0.8)'}}>🖼️ Kid Avatars</div>
@@ -753,6 +793,131 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,
           <button onClick={savePins} style={{width:'100%',background:'#2563eb',border:'none',borderRadius:12,padding:12,color:'white',fontWeight:700,cursor:'pointer',fontSize:15,fontFamily:'inherit',marginTop:8}}>Save PINs</button>
           {savedMsg&&<div style={{color:'#4ade80',textAlign:'center',marginTop:10,fontWeight:700}}>{savedMsg}</div>}
         </>}
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════
+   BACKUP & RESTORE
+══════════════════════════════════════════ */
+function BackupRestore({config, avatars, bal, alltime}) {
+  const [status,    setStatus]    = useState('');
+  const [restoring, setRestoring] = useState(false);
+  const importRef = useRef(null);
+
+  const BACKUP_KEYS = [
+    'cm-config',
+    'cm-rewards',
+    'cm-activity',
+    'cm-reward-requests',
+    'cm-b-isabella',
+    'cm-b-jocelyn',
+    'cm-alltime-isabella',
+    'cm-alltime-jocelyn',
+    'cm-avatar-isabella',
+    'cm-avatar-jocelyn',
+  ];
+
+  const doBackup = async () => {
+    setStatus('⏳ Collecting data…');
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      // Also grab today's completions
+      const allKeys = [
+        ...BACKUP_KEYS,
+        `cm-c-isabella-${today}`,
+        `cm-c-jocelyn-${today}`,
+        `cm-daily-isabella-${today}`,
+        `cm-daily-jocelyn-${today}`,
+      ];
+      const values = await Promise.all(allKeys.map(k => S.get(k)));
+      const backup = {
+        version: VERSION,
+        exportedAt: new Date().toISOString(),
+        data: Object.fromEntries(allKeys.map((k, i) => [k, values[i]])),
+      };
+      const json = JSON.stringify(backup, null, 2);
+      const blob = new Blob([json], { type: 'application/json' });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href     = url;
+      a.download = `koda-backup-${today}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setStatus('✅ Backup downloaded!');
+      setTimeout(() => setStatus(''), 4000);
+    } catch(e) {
+      setStatus(`❌ Backup failed: ${e.message}`);
+      setTimeout(() => setStatus(''), 5000);
+    }
+  };
+
+  const doRestore = async (file) => {
+    if (!file) return;
+    setRestoring(true);
+    setStatus('⏳ Reading backup file…');
+    try {
+      const text   = await file.text();
+      const backup = JSON.parse(text);
+      if (!backup.data) throw new Error('Invalid backup file — missing data');
+      setStatus(`⏳ Restoring ${Object.keys(backup.data).length} records…`);
+      const entries = Object.entries(backup.data).filter(([, v]) => v !== null && v !== undefined);
+      await Promise.all(entries.map(([k, v]) => S.set(k, typeof v === 'string' ? v : JSON.stringify(v))));
+      setStatus(`✅ Restored! Backed up on ${new Date(backup.exportedAt).toLocaleDateString()}. Reload the app to see changes.`);
+    } catch(e) {
+      setStatus(`❌ Restore failed: ${e.message}`);
+    } finally {
+      setRestoring(false);
+      if (importRef.current) importRef.current.value = '';
+    }
+  };
+
+  return (
+    <div style={{marginBottom:28}}>
+      <div style={{fontWeight:700,fontSize:15,marginBottom:6,color:'rgba(255,255,255,0.8)'}}>💾 Backup & Restore</div>
+      <div style={{color:'rgba(255,255,255,0.4)',fontSize:12,marginBottom:14}}>
+        Backup saves all tasks, stars, rewards, activity and avatars to a file on your phone. Use it to recover data or move to a new device.
+      </div>
+
+      <div style={{display:'flex',gap:10,marginBottom:12}}>
+        {/* Backup */}
+        <button onClick={doBackup} style={{flex:1,background:'rgba(59,130,246,0.15)',border:'1.5px solid rgba(59,130,246,0.4)',borderRadius:14,padding:'14px 10px',color:'#60a5fa',fontWeight:700,cursor:'pointer',fontSize:14,fontFamily:'inherit',display:'flex',flexDirection:'column',alignItems:'center',gap:4}}>
+          <span style={{fontSize:24}}>📤</span>
+          <span>Export Backup</span>
+          <span style={{fontSize:10,fontWeight:400,color:'rgba(255,255,255,0.4)'}}>Downloads .json file</span>
+        </button>
+
+        {/* Restore */}
+        <label style={{flex:1,background:'rgba(251,191,36,0.12)',border:'1.5px solid rgba(251,191,36,0.3)',borderRadius:14,padding:'14px 10px',color:'#fbbf24',fontWeight:700,cursor:restoring?'default':'pointer',fontSize:14,fontFamily:'inherit',display:'flex',flexDirection:'column',alignItems:'center',gap:4,opacity:restoring?0.6:1}}>
+          <span style={{fontSize:24}}>📥</span>
+          <span>{restoring?'Restoring…':'Import Backup'}</span>
+          <span style={{fontSize:10,fontWeight:400,color:'rgba(255,255,255,0.4)'}}>Pick .json file</span>
+          <input ref={importRef} type="file" accept=".json,application/json" disabled={restoring} onChange={e=>doRestore(e.target.files?.[0])} style={{display:'none'}}/>
+        </label>
+      </div>
+
+      {status && (
+        <div style={{background: status.startsWith('✅') ? 'rgba(74,222,128,0.12)' : status.startsWith('❌') ? 'rgba(239,68,68,0.12)' : 'rgba(255,255,255,0.06)', border: `1px solid ${status.startsWith('✅') ? 'rgba(74,222,128,0.3)' : status.startsWith('❌') ? 'rgba(239,68,68,0.3)' : 'rgba(255,255,255,0.1)'}`, borderRadius:12,padding:'10px 14px',fontSize:13,color: status.startsWith('✅') ? '#4ade80' : status.startsWith('❌') ? '#f87171' : 'rgba(255,255,255,0.7)',lineHeight:1.5}}>
+          {status}
+        </div>
+      )}
+
+      {/* Quick stats of what would be backed up */}
+      <div style={{display:'flex',gap:8,marginTop:12}}>
+        {[
+          {label:'Tasks', val: (config?.tasks?.isabella?.length||0)+(config?.tasks?.jocelyn?.length||0)},
+          {label:'Isa Stars', val: bal?.isabella||0},
+          {label:'Jossy Stars', val: bal?.jocelyn||0},
+          {label:'Isa All-Time', val: alltime?.isabella||0},
+        ].map(({label,val})=>(
+          <div key={label} style={{flex:1,background:'rgba(255,255,255,0.04)',borderRadius:10,padding:'6px 8px',textAlign:'center'}}>
+            <div style={{fontWeight:700,fontSize:14,color:'white'}}>{val}</div>
+            <div style={{fontSize:10,color:'rgba(255,255,255,0.35)'}}>{label}</div>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -1009,6 +1174,7 @@ function TaskRow({task,done,pending,isFirst,isLast,color,onReorder,onToggleProof
         <div style={{display:'flex',alignItems:'center',gap:6,marginTop:2}}>
           <span style={{color:'rgba(255,255,255,0.3)',fontSize:11}}>
             {task.isMantras&&'📖 · '}{task.isGoal&&'🎯 · '}
+            {task.recurring ? '🔄 · ' : '📌 Today · '}
           </span>
           {/* Inline star editor */}
           <div style={{display:'flex',alignItems:'center',gap:3}}>
@@ -1063,9 +1229,12 @@ function Toggle({on,color,onChange}) {
 function KidView({user,theme,tasks,comp,proofs,goal,rewards,rewardReqs,onToggle,onComplete,onSubmitProof,onSetGoal,onRequestReward,bal,alltime,dailyEarned,avatar,logout}) {
   const isIsa = theme==='kawaii';
   const [kidTab, setKidTab] = useState('tasks');
-  const done  = comp.length;
-  const total = tasks.length;
-  const pct   = total>0?Math.round(done/total*100):0;
+  // filter to today's visible tasks
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const visibleTaskIds = tasks.filter(t => t.recurring || !t.createdDate || t.createdDate === todayStr).map(t => t.id);
+  const done    = comp.filter(id => visibleTaskIds.includes(id)).length;
+  const total   = visibleTaskIds.length;
+  const pct     = total>0?Math.round(done/total*100):0;
   const allDone = done===total&&total>0;
 
   const bgStyle    = isIsa ? {background:'linear-gradient(160deg,#12003a 0%,#2d0068 50%,#12003a 100%)'} : {background:'linear-gradient(160deg,#1a0010 0%,#3d0020 50%,#1a0010 100%)',backgroundImage:`url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220' viewBox='0 0 220 220'%3E%3Cg stroke='rgba(255,130,170,0.10)' fill='none' stroke-width='0.8'%3E%3Ccircle cx='110' cy='110' r='20'/%3E%3Ccircle cx='110' cy='110' r='45'/%3E%3Ccircle cx='110' cy='110' r='70'/%3E%3Ccircle cx='110' cy='110' r='96'/%3E%3Cline x1='110' y1='14' x2='110' y2='206'/%3E%3Cline x1='14' y1='110' x2='206' y2='110'/%3E%3Cline x1='42' y1='42' x2='178' y2='178'/%3E%3Cline x1='178' y1='42' x2='42' y2='178'/%3E%3C/g%3E%3C/svg%3E")`,backgroundSize:'220px 220px'};
@@ -1089,9 +1258,15 @@ function KidView({user,theme,tasks,comp,proofs,goal,rewards,rewardReqs,onToggle,
     : done<=1 ? `Great start! ${done} done ✨`
     : `${done} of ${total} done — keep going! 💪`;
 
-  // group tasks by timeOfDay
+  // group tasks by timeOfDay — filter out expired one-time tasks
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const visibleTasks = tasks.filter(t => {
+    if (t.recurring) return true;
+    if (!t.createdDate) return true; // legacy
+    return t.createdDate === todayStr;
+  });
   const groups = {};
-  tasks.forEach(t=>{ const g=t.timeOfDay||'general'; if(!groups[g])groups[g]=[]; groups[g].push(t); });
+  visibleTasks.forEach(t=>{ const g=t.timeOfDay||'general'; if(!groups[g])groups[g]=[]; groups[g].push(t); });
 
   return(
     <div style={{minHeight:'100vh',...bgStyle,fontFamily:ff,color:'white',position:'relative',overflow:'hidden'}}>
@@ -1172,7 +1347,7 @@ function KidView({user,theme,tasks,comp,proofs,goal,rewards,rewardReqs,onToggle,
 
       {/* Task groups */}
       <div style={{padding:'8px 20px 120px',position:'relative',zIndex:2}}>
-        {tasks.length===0&&<div style={{textAlign:'center',padding:60,color:'rgba(255,182,213,0.4)',fontFamily:"'Nunito',sans-serif"}}>No tasks yet! Ask a parent to add some 🌸</div>}
+        {visibleTasks.length===0&&<div style={{textAlign:'center',padding:60,color:'rgba(255,182,213,0.4)',fontFamily:"'Nunito',sans-serif"}}>No tasks yet! Ask a parent to add some 🌸</div>}
         {TIME_GROUPS.map(grp=>{
           const grpTasks=groups[grp]; if(!grpTasks||grpTasks.length===0)return null;
           const meta=TIME_META[grp];
