@@ -1259,7 +1259,6 @@ function KidView({user,theme,tasks,comp,proofs,goal,rewards,rewardReqs,onToggle,
     : `${done} of ${total} done — keep going! 💪`;
 
   // group tasks by timeOfDay — filter out expired one-time tasks
-  const todayStr = new Date().toISOString().slice(0, 10);
   const visibleTasks = tasks.filter(t => {
     if (t.recurring) return true;
     if (!t.createdDate) return true; // legacy
