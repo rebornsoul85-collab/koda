@@ -5,7 +5,7 @@ import { getDatabase, ref, set, get, onValue } from "firebase/database";
 /* ══════════════════════════════════════════
    VERSION
 ══════════════════════════════════════════ */
-const VERSION = 'v12';
+const VERSION = 'v13';
 
 /* ══════════════════════════════════════════
    FIREBASE
@@ -174,6 +174,9 @@ export default function App() {
   const [fbStatus,     setFbStatus]    = useState('checking');
   const [currentParent,setCurrentParent]=useState('');
   const [activity,     setActivity]    = useState([]);
+  const [avatars,      setAvatars]     = useState({ isabella:'', jocelyn:'' });
+  const [alltime,      setAlltime]     = useState({ isabella:0,  jocelyn:0  });
+  const [dailyEarned,  setDailyEarned] = useState({ isabella:0,  jocelyn:0  });
   const [loading,      setLoading]     = useState(true);
 
   const showToast = (msg) => {
@@ -194,13 +197,15 @@ export default function App() {
 
     // ── Load static config data once ──────────────────────────────
     const loadStatic = async () => {
-      const [rawCfg, rawRwds, rawAct] = await Promise.all([
+      const today = TODAY();
+      const [rawCfg, rawRwds, rawAct, ibAv, jcAv] = await Promise.all([
         S.get('cm-config'),
         S.get('cm-rewards'),
         S.get('cm-activity'),
+        S.get('cm-avatar-isabella'),
+        S.get('cm-avatar-jocelyn'),
       ]);
       let cfg = rawCfg ? JSON.parse(rawCfg) : DEFAULT;
-      // ── Migration: convert old 'parent' PIN to mom + dad ──
       if (cfg.pins.parent && !cfg.pins.mom) {
         cfg.pins.mom = cfg.pins.parent;
         cfg.pins.dad = '5678';
@@ -210,6 +215,7 @@ export default function App() {
       setConfig(cfg);
       setRewards(rawRwds ? JSON.parse(rawRwds) : DEFAULT_REWARDS);
       setActivity(rawAct ? JSON.parse(rawAct) : []);
+      setAvatars({ isabella: ibAv || '', jocelyn: jcAv || '' });
       setLoading(false);
     };
     loadStatic();
@@ -262,6 +268,18 @@ export default function App() {
     // Activity log
     listen('cm-activity', v => setActivity(v ? JSON.parse(v) : []));
 
+    // All-time stars (lifetime total, never decreases)
+    listen('cm-alltime-isabella', v => setAlltime(p => ({...p, isabella: v ? parseInt(v) : 0})));
+    listen('cm-alltime-jocelyn',  v => setAlltime(p => ({...p, jocelyn:  v ? parseInt(v) : 0})));
+
+    // Daily earned (resets each day automatically via date key)
+    listen(`cm-daily-isabella-${today}`, v => setDailyEarned(p => ({...p, isabella: v ? parseInt(v) : 0})));
+    listen(`cm-daily-jocelyn-${today}`,  v => setDailyEarned(p => ({...p, jocelyn:  v ? parseInt(v) : 0})));
+
+    // Avatars (real-time so parent upload shows up immediately)
+    listen('cm-avatar-isabella', v => setAvatars(p => ({...p, isabella: v || ''})));
+    listen('cm-avatar-jocelyn',  v => setAvatars(p => ({...p, jocelyn:  v || ''})));
+
     // Clean up all listeners when component unmounts
     return () => unsubs.forEach(fn => fn());
   }, []);
@@ -310,6 +328,20 @@ export default function App() {
     setBal(p  => ({ ...p, [user]: newBal  }));
     await S.set(`cm-c-${user}-${today}`, JSON.stringify(newComp));
     await S.set(`cm-b-${user}`, String(newBal));
+    // Track alltime and daily only when earning (checking on), not when undoing
+    if (checking) {
+      const newAlltime = alltime[user] + task.minutes;
+      const newDaily   = dailyEarned[user] + task.minutes;
+      setAlltime(p => ({ ...p, [user]: newAlltime }));
+      setDailyEarned(p => ({ ...p, [user]: newDaily }));
+      await S.set(`cm-alltime-${user}`, String(newAlltime));
+      await S.set(`cm-daily-${user}-${today}`, String(newDaily));
+    } else {
+      // Undo: deduct from daily (but not alltime — earned is earned)
+      const newDaily = Math.max(0, dailyEarned[user] - task.minutes);
+      setDailyEarned(p => ({ ...p, [user]: newDaily }));
+      await S.set(`cm-daily-${user}-${today}`, String(newDaily));
+    }
   };
 
   // Force complete (used by goal submit & mantra done)
@@ -319,10 +351,16 @@ export default function App() {
     if (!task || comp[user].includes(taskId)) return;
     const newComp = [...comp[user], taskId];
     const newBal  = bal[user] + task.minutes;
+    const newAlltime = alltime[user] + task.minutes;
+    const newDaily   = dailyEarned[user] + task.minutes;
     setComp(p => ({ ...p, [user]: newComp }));
     setBal(p  => ({ ...p, [user]: newBal  }));
+    setAlltime(p => ({ ...p, [user]: newAlltime }));
+    setDailyEarned(p => ({ ...p, [user]: newDaily }));
     await S.set(`cm-c-${user}-${today}`, JSON.stringify(newComp));
     await S.set(`cm-b-${user}`, String(newBal));
+    await S.set(`cm-alltime-${user}`, String(newAlltime));
+    await S.set(`cm-daily-${user}-${today}`, String(newDaily));
   };
 
   // Kid sets their daily goal
@@ -374,10 +412,16 @@ export default function App() {
       const task    = config.tasks[user].find(t => t.id === taskId);
       const newComp = [...comp[user], taskId];
       const newBal  = bal[user] + (task?.minutes || 0);
+      const newAlltime = alltime[user] + (task?.minutes || 0);
+      const newDaily   = dailyEarned[user] + (task?.minutes || 0);
       setComp(p => ({ ...p, [user]: newComp }));
       setBal(p  => ({ ...p, [user]: newBal  }));
+      setAlltime(p => ({ ...p, [user]: newAlltime }));
+      setDailyEarned(p => ({ ...p, [user]: newDaily }));
       await S.set(`cm-c-${user}-${today}`, JSON.stringify(newComp));
       await S.set(`cm-b-${user}`, String(newBal));
+      await S.set(`cm-alltime-${user}`, String(newAlltime));
+      await S.set(`cm-daily-${user}-${today}`, String(newDaily));
       await set(ref(db, `cm-proofs/${user}/${today}/${taskId}`), null);
     }
   };
@@ -398,6 +442,12 @@ export default function App() {
   const saveRewards = async (updated) => {
     setRewards(updated);
     await S.set('cm-rewards', JSON.stringify(updated));
+  };
+
+  // Upload avatar for a kid
+  const saveAvatar = async (user, imageBase64) => {
+    setAvatars(p => ({ ...p, [user]: imageBase64 }));
+    await S.set(`cm-avatar-${user}`, imageBase64);
   };
 
   // Kid requests a reward
@@ -459,18 +509,18 @@ export default function App() {
 
   if (loading) return <div style={{minHeight:'100vh',background:'#0d0d2b',display:'flex',alignItems:'center',justifyContent:'center'}}><div style={{color:'white',fontFamily:'sans-serif',fontSize:20}}>🌟 Loading Koda…</div></div>;
 
-  if (view==='landing')   return <Landing onSelect={t=>{setPinTarget(t);setView('pin');}}/>;
+  if (view==='landing')   return <Landing onSelect={t=>{setPinTarget(t);setView('pin');}} avatars={avatars}/>;
   if (view==='pin')       return <PinScreen target={pinTarget} config={config} onSuccess={()=>{if(pinTarget==='mom'||pinTarget==='dad')setCurrentParent(pinTarget==='mom'?'Mom':'Dad');setView(pinTarget);}} onBack={()=>setView('landing')}/>;
-  if (view==='mom'||view==='dad') return <><ParentView config={config} saveConfig={saveConfig} comp={comp} bal={bal} proofs={proofs} goals={goals} rewards={rewards} rewardReqs={rewardReqs} activity={activity} redeem={redeem} approveProof={approveProof} rejectProof={rejectProof} toggleProofRequired={toggleProofRequired} reorderTask={reorderTask} updateTaskStars={updateTaskStars} saveRewards={saveRewards} approveRewardReq={approveRewardReq} denyRewardReq={denyRewardReq} fbStatus={fbStatus} toggleTask={toggleTask} parentName={currentParent} logout={()=>setView('landing')}/>{toast&&<Toast msg={toast}/>}</>;
-  if (view==='isabella')  return <><KidView user="isabella" theme="kawaii" tasks={config.tasks.isabella} comp={comp.isabella} proofs={proofs.isabella} goal={goals.isabella} rewards={rewards} rewardReqs={rewardReqs.filter(r=>r.user==='isabella')} bal={bal.isabella} onToggle={id=>toggleTask('isabella',id)} onComplete={id=>completeTask('isabella',id)} onSubmitProof={(id,p)=>submitProof('isabella',id,p)} onSetGoal={g=>submitGoal('isabella',g)} onRequestReward={r=>requestReward('isabella',r)} logout={()=>setView('landing')}/>{toast&&<Toast msg={toast}/>}</>;
-  if (view==='jocelyn')   return <><KidView user="jocelyn"  theme="spidey" tasks={config.tasks.jocelyn}  comp={comp.jocelyn}  proofs={proofs.jocelyn}  goal={goals.jocelyn}  rewards={rewards} rewardReqs={rewardReqs.filter(r=>r.user==='jocelyn')}  bal={bal.jocelyn}  onToggle={id=>toggleTask('jocelyn',id)}  onComplete={id=>completeTask('jocelyn',id)}  onSubmitProof={(id,p)=>submitProof('jocelyn',id,p)}  onSetGoal={g=>submitGoal('jocelyn',g)}  onRequestReward={r=>requestReward('jocelyn',r)}  logout={()=>setView('landing')}/>{toast&&<Toast msg={toast}/>}</>;
+  if (view==='mom'||view==='dad') return <><ParentView config={config} saveConfig={saveConfig} comp={comp} bal={bal} proofs={proofs} goals={goals} rewards={rewards} rewardReqs={rewardReqs} activity={activity} avatars={avatars} alltime={alltime} dailyEarned={dailyEarned} redeem={redeem} approveProof={approveProof} rejectProof={rejectProof} toggleProofRequired={toggleProofRequired} reorderTask={reorderTask} updateTaskStars={updateTaskStars} saveRewards={saveRewards} saveAvatar={saveAvatar} approveRewardReq={approveRewardReq} denyRewardReq={denyRewardReq} fbStatus={fbStatus} toggleTask={toggleTask} parentName={currentParent} logout={()=>setView('landing')}/>{toast&&<Toast msg={toast}/>}</>;
+  if (view==='isabella')  return <><KidView user="isabella" theme="kawaii" tasks={config.tasks.isabella} comp={comp.isabella} proofs={proofs.isabella} goal={goals.isabella} rewards={rewards} rewardReqs={rewardReqs.filter(r=>r.user==='isabella')} bal={bal.isabella} alltime={alltime.isabella} dailyEarned={dailyEarned.isabella} avatar={avatars.isabella} onToggle={id=>toggleTask('isabella',id)} onComplete={id=>completeTask('isabella',id)} onSubmitProof={(id,p)=>submitProof('isabella',id,p)} onSetGoal={g=>submitGoal('isabella',g)} onRequestReward={r=>requestReward('isabella',r)} logout={()=>setView('landing')}/>{toast&&<Toast msg={toast}/>}</>;
+  if (view==='jocelyn')   return <><KidView user="jocelyn"  theme="spidey" tasks={config.tasks.jocelyn}  comp={comp.jocelyn}  proofs={proofs.jocelyn}  goal={goals.jocelyn}  rewards={rewards} rewardReqs={rewardReqs.filter(r=>r.user==='jocelyn')}  bal={bal.jocelyn}  alltime={alltime.jocelyn}  dailyEarned={dailyEarned.jocelyn}  avatar={avatars.jocelyn}  onToggle={id=>toggleTask('jocelyn',id)}  onComplete={id=>completeTask('jocelyn',id)}  onSubmitProof={(id,p)=>submitProof('jocelyn',id,p)}  onSetGoal={g=>submitGoal('jocelyn',g)}  onRequestReward={r=>requestReward('jocelyn',r)}  logout={()=>setView('landing')}/>{toast&&<Toast msg={toast}/>}</>;
   return null;
 }
 
 /* ══════════════════════════════════════════
    LANDING
 ══════════════════════════════════════════ */
-function Landing({ onSelect }) {
+function Landing({ onSelect, avatars }) {
   return (
     <div style={{minHeight:'100vh',background:'linear-gradient(160deg,#0d0d2b 0%,#1a0533 60%,#0d1a2b 100%)',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:24,fontFamily:"'Nunito',sans-serif",position:'relative',overflow:'hidden'}}>
       <Stars/>
@@ -482,8 +532,8 @@ function Landing({ onSelect }) {
       <div style={{width:'100%',maxWidth:380,position:'relative',zIndex:1}}>
         <LandingCard emoji="👩" name="Mom" sub="Mission Control" bg="linear-gradient(135deg,#be185d,#db2777)" border="rgba(251,182,206,0.4)" glow="rgba(219,39,119,0.3)" onClick={()=>onSelect('mom')}/>
         <LandingCard emoji="👨" name="Dad" sub="Mission Control" bg="linear-gradient(135deg,#1e3a5f,#243b80)" border="rgba(99,179,237,0.35)" glow="rgba(59,130,246,0.25)" onClick={()=>onSelect('dad')}/>
-        <LandingCard emoji="🌸" name="Isabella" sub="✨ Your kawaii quests!" bg="linear-gradient(135deg,#7b2ff7,#f107a3)" border="rgba(255,182,213,0.5)" glow="rgba(241,7,163,0.3)" badge="アニメ" onClick={()=>onSelect('isabella')}/>
-        <LandingCard emoji="🕷️" name="Jossy" sub="Your web of tasks awaits 💅" bg="linear-gradient(135deg,#8b0000,#e91e63)" border="rgba(255,100,150,0.4)" glow="rgba(220,0,50,0.3)" webDeco onClick={()=>onSelect('jocelyn')}/>
+        <LandingCard emoji="🌸" name="Isabella" sub="✨ Your kawaii quests!" bg="linear-gradient(135deg,#7b2ff7,#f107a3)" border="rgba(255,182,213,0.5)" glow="rgba(241,7,163,0.3)" badge="アニメ" avatar={avatars.isabella} onClick={()=>onSelect('isabella')}/>
+        <LandingCard emoji="🕷️" name="Jossy" sub="Your web of tasks awaits 💅" bg="linear-gradient(135deg,#8b0000,#e91e63)" border="rgba(255,100,150,0.4)" glow="rgba(220,0,50,0.3)" webDeco avatar={avatars.jocelyn} onClick={()=>onSelect('jocelyn')}/>
       </div>
       <div style={{marginTop:20,padding:'8px 18px',background:'rgba(255,255,255,0.05)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:10,color:'rgba(255,255,255,0.3)',fontSize:11,position:'relative',zIndex:1,textAlign:'center'}}>
         🌟 Koda {VERSION} &nbsp;·&nbsp; Mom 1234 · Dad 5678 · Isabella 1111 · Jossy 2222
@@ -497,14 +547,20 @@ function Stars() {
   return <div style={{position:'absolute',inset:0,overflow:'hidden',pointerEvents:'none'}}>{stars.map((s,i)=><div key={i} style={{position:'absolute',left:`${s.x}%`,top:`${s.y}%`,width:s.size,height:s.size,borderRadius:'50%',background:'white',animation:`twinkle ${s.dur}s ${s.delay}s infinite`}}/>)}</div>;
 }
 
-function LandingCard({emoji,name,sub,bg,border,glow,badge,webDeco,onClick}) {
+function LandingCard({emoji,name,sub,bg,border,glow,badge,webDeco,avatar,onClick}) {
   const [hov,setHov]=useState(false);
   const webPat=`url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'%3E%3Cg stroke='rgba(255,255,255,0.18)' fill='none' stroke-width='0.7'%3E%3Ccircle cx='60' cy='60' r='15'/%3E%3Ccircle cx='60' cy='60' r='35'/%3E%3Ccircle cx='60' cy='60' r='55'/%3E%3Cline x1='60' y1='5' x2='60' y2='115'/%3E%3Cline x1='5' y1='60' x2='115' y2='60'/%3E%3Cline x1='18' y1='18' x2='102' y2='102'/%3E%3Cline x1='102' y1='18' x2='18' y2='102'/%3E%3C/g%3E%3C/svg%3E")`;
   return (
     <div onClick={onClick} onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
       style={{background:bg,border:`1.5px solid ${border}`,borderRadius:22,padding:'18px 22px',marginBottom:14,cursor:'pointer',display:'flex',alignItems:'center',gap:14,position:'relative',overflow:'hidden',boxShadow:hov?`0 12px 44px ${glow}`:`0 4px 22px rgba(0,0,0,0.45)`,transform:hov?'translateY(-3px) scale(1.01)':'none',transition:'all 0.25s cubic-bezier(.34,1.56,.64,1)'}}>
       {webDeco&&<div style={{position:'absolute',right:-20,top:-20,width:120,height:120,backgroundImage:webPat,backgroundSize:'contain',backgroundRepeat:'no-repeat',animation:'webDrift 6s ease infinite'}}/>}
-      <div style={{fontSize:36,animation:hov?'float 1.5s ease infinite':'none',flexShrink:0}}>{emoji}</div>
+      {/* Avatar circle or emoji */}
+      {avatar
+        ? <div style={{width:46,height:46,borderRadius:'50%',overflow:'hidden',flexShrink:0,border:'2px solid rgba(255,255,255,0.4)',boxShadow:hov?`0 0 16px ${glow}`:'none',transition:'box-shadow 0.25s'}}>
+            <img src={avatar} alt={name} style={{width:'100%',height:'100%',objectFit:'cover'}}/>
+          </div>
+        : <div style={{fontSize:36,animation:hov?'float 1.5s ease infinite':'none',flexShrink:0}}>{emoji}</div>
+      }
       <div style={{flex:1}}>
         <div style={{display:'flex',alignItems:'center',gap:8,color:'white',fontWeight:800,fontSize:20}}>
           {name}{badge&&<span style={{fontSize:11,background:'rgba(255,255,255,0.25)',borderRadius:6,padding:'2px 8px',fontWeight:700,letterSpacing:1}}>{badge}</span>}
@@ -558,7 +614,7 @@ function PinScreen({target,config,onSuccess,onBack}) {
 /* ══════════════════════════════════════════
    PARENT DASHBOARD
 ══════════════════════════════════════════ */
-function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,activity,redeem,approveProof,rejectProof,toggleProofRequired,reorderTask,updateTaskStars,saveRewards,approveRewardReq,denyRewardReq,fbStatus,toggleTask,parentName,logout}) {
+function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,activity,avatars,alltime,dailyEarned,redeem,approveProof,rejectProof,toggleProofRequired,reorderTask,updateTaskStars,saveRewards,saveAvatar,approveRewardReq,denyRewardReq,fbStatus,toggleTask,parentName,logout}) {
   const [tab,setTab]=useState('overview');
   const [addFor,setAddFor]=useState(null);
   const [newTask,setNewTask]=useState({title:'',emoji:'⭐',recurring:true,minutes:15,requiresProof:false,timeOfDay:'morning'});
@@ -617,7 +673,7 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,
 
       <div style={{padding:'20px',maxWidth:580,margin:'0 auto'}}>
 
-        {tab==='overview'&&<ParentOverview comp={comp} bal={bal} proofs={proofs} goals={goals} config={config} rewardReqs={rewardReqs} onShowProof={()=>setTab('proof')} onShowRewards={()=>setTab('rewards')}/>}
+        {tab==='overview'&&<ParentOverview comp={comp} bal={bal} proofs={proofs} goals={goals} config={config} rewardReqs={rewardReqs} avatars={avatars} alltime={alltime} dailyEarned={dailyEarned} onShowProof={()=>setTab('proof')} onShowRewards={()=>setTab('rewards')}/>}
         {tab==='proof'&&<ProofInbox proofs={proofs} config={config} onApprove={approveProof} onReject={rejectProof} parentName={parentName}/>}
         {tab==='rewards'&&<RewardRequests rewardReqs={rewardReqs} bal={bal} onApprove={approveRewardReq} onDeny={denyRewardReq} parentName={parentName}/>}
         {tab==='activity'&&<ActivityLog activity={activity}/>}
@@ -649,8 +705,45 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,
         </>}
 
         {tab==='settings'&&<>
-          <h2 style={{fontWeight:800,fontSize:20,marginBottom:6}}>⚙️ Change PINs</h2>
-          <p style={{color:'rgba(255,255,255,0.4)',fontSize:13,marginBottom:20}}>Leave blank to keep current PIN</p>
+          <h2 style={{fontWeight:800,fontSize:20,marginBottom:6}}>⚙️ Settings</h2>
+
+          {/* Avatar upload */}
+          <div style={{marginBottom:24}}>
+            <div style={{fontWeight:700,fontSize:15,marginBottom:12,color:'rgba(255,255,255,0.8)'}}>🖼️ Kid Avatars</div>
+            {[{key:'isabella',label:'🌸 Isabella'},{key:'jocelyn',label:'🕷️ Jossy'}].map(({key,label})=>(
+              <div key={key} style={{display:'flex',alignItems:'center',gap:14,background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.08)',borderRadius:16,padding:'14px 16px',marginBottom:10}}>
+                {avatars[key]
+                  ? <img src={avatars[key]} alt={key} style={{width:52,height:52,borderRadius:'50%',objectFit:'cover',border:'2px solid rgba(255,255,255,0.3)',flexShrink:0}}/>
+                  : <div style={{width:52,height:52,borderRadius:'50%',background:'rgba(255,255,255,0.1)',border:'2px dashed rgba(255,255,255,0.2)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:22,flexShrink:0}}>{key==='isabella'?'🌸':'🕷️'}</div>
+                }
+                <div style={{flex:1}}>
+                  <div style={{fontWeight:700,fontSize:14,marginBottom:4}}>{label}</div>
+                  <div style={{color:'rgba(255,255,255,0.4)',fontSize:12}}>{avatars[key]?'Tap to change avatar':'No avatar set'}</div>
+                </div>
+                <label style={{background:'rgba(255,255,255,0.1)',border:'1px solid rgba(255,255,255,0.2)',borderRadius:10,padding:'6px 14px',color:'white',cursor:'pointer',fontSize:13,fontFamily:'inherit',fontWeight:600}}>
+                  {avatars[key]?'Change':'Upload'}
+                  <input type="file" accept="image/*" style={{display:'none'}} onChange={async e=>{
+                    const file=e.target.files?.[0]; if(!file)return;
+                    const canvas=document.createElement('canvas');
+                    const ctx=canvas.getContext('2d');
+                    const img=new Image();
+                    img.onload=async()=>{
+                      const size=Math.min(img.width,img.height);
+                      canvas.width=200;canvas.height=200;
+                      ctx.beginPath();ctx.arc(100,100,100,0,Math.PI*2);ctx.clip();
+                      ctx.drawImage(img,(img.width-size)/2,(img.height-size)/2,size,size,0,0,200,200);
+                      await saveAvatar(key,canvas.toDataURL('image/jpeg',0.85));
+                    };
+                    img.src=URL.createObjectURL(file);
+                    e.target.value='';
+                  }}/>
+                </label>
+              </div>
+            ))}
+          </div>
+
+          <div style={{fontWeight:700,fontSize:15,marginBottom:12,color:'rgba(255,255,255,0.8)'}}>🔐 Change PINs</div>
+          <p style={{color:'rgba(255,255,255,0.4)',fontSize:13,marginBottom:16}}>Leave blank to keep current PIN</p>
           {[{key:'mom',label:'👩 Mom'},{key:'dad',label:'👨 Dad'},{key:'isabella',label:'🌸 Isabella'},{key:'jocelyn',label:'🕷️ Jossy'}].map(({key,label})=>(
             <div key={key} style={{marginBottom:14}}>
               <label style={{display:'block',color:'rgba(255,255,255,0.55)',fontSize:13,marginBottom:6}}>{label} <span style={{color:'rgba(255,255,255,0.25)'}}>— current: {config.pins[key]}</span></label>
@@ -665,7 +758,7 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,
   );
 }
 
-function ParentOverview({comp,bal,proofs,goals,config,rewardReqs,onShowProof,onShowRewards}) {
+function ParentOverview({comp,bal,proofs,goals,config,rewardReqs,avatars,alltime,dailyEarned,onShowProof,onShowRewards}) {
   const pendingProofs  = Object.keys(proofs.isabella||{}).length+Object.keys(proofs.jocelyn||{}).length;
   const pendingRewards = rewardReqs.filter(r=>r.status==='pending'||r.status==='first_approved'||(r.status===undefined)).length;
   return(
@@ -675,22 +768,42 @@ function ParentOverview({comp,bal,proofs,goals,config,rewardReqs,onShowProof,onS
         const tasks=config.tasks[u]; const done=comp[u].length; const total=tasks.length;
         const pct=total>0?Math.round(done/total*100):0;
         const color=u==='isabella'?'#f107a3':'#e91e63';
-        const name=u==='isabella'?'🌸 Isabella':'🕷️ Jossy';
+        const name=u==='isabella'?'Isabella':'Jossy';
         const pending=Object.keys(proofs[u]||{}).length;
+        const avatar=avatars?.[u];
         return(
           <div key={u} style={{background:'rgba(255,255,255,0.04)',borderRadius:18,padding:18,marginBottom:12,border:'1px solid rgba(255,255,255,0.07)'}}>
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
-              <span style={{fontWeight:700,fontSize:16}}>{name}</span>
-              <span style={{color,fontWeight:700}}>{done}/{total} done</span>
+            <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:12}}>
+              {avatar
+                ? <img src={avatar} alt={name} style={{width:44,height:44,borderRadius:'50%',objectFit:'cover',border:`2px solid ${color}`,flexShrink:0}}/>
+                : <div style={{width:44,height:44,borderRadius:'50%',background:`${color}22`,border:`2px solid ${color}40`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:20,flexShrink:0}}>{u==='isabella'?'🌸':'🕷️'}</div>
+              }
+              <div style={{flex:1}}>
+                <div style={{fontWeight:700,fontSize:16,color:'white'}}>{name}</div>
+                <div style={{color:'rgba(255,255,255,0.4)',fontSize:12}}>{done}/{total} tasks done today</div>
+              </div>
+              {pending>0&&<span style={{color:'#fbbf24',fontWeight:700,fontSize:12}}>📸 {pending}</span>}
             </div>
-            <div style={{background:'rgba(255,255,255,0.1)',borderRadius:100,height:10,overflow:'hidden',marginBottom:8}}>
+            {/* Progress bar */}
+            <div style={{background:'rgba(255,255,255,0.1)',borderRadius:100,height:8,overflow:'hidden',marginBottom:12}}>
               <div style={{background:color,width:`${pct}%`,height:'100%',borderRadius:100,transition:'width 0.6s ease'}}/>
             </div>
-            <div style={{display:'flex',gap:12,fontSize:12,color:'rgba(255,255,255,0.4)',flexWrap:'wrap'}}>
-              <span>🌟 {bal[u]} stars banked</span>
-              {goals[u]&&<span style={{color:'rgba(255,255,255,0.6)'}}>🎯 Goal: &ldquo;{goals[u]}&rdquo;</span>}
-              {pending>0&&<span style={{color:'#fbbf24',fontWeight:700}}>📸 {pending} awaiting approval</span>}
+            {/* Star breakdown */}
+            <div style={{display:'flex',gap:8}}>
+              <div style={{flex:1,background:'rgba(255,255,255,0.04)',borderRadius:10,padding:'6px 8px',textAlign:'center'}}>
+                <div style={{fontWeight:800,fontSize:16,color}}>{bal[u]}</div>
+                <div style={{color:'rgba(255,255,255,0.4)',fontSize:10}}>🌟 Balance</div>
+              </div>
+              <div style={{flex:1,background:'rgba(255,255,255,0.04)',borderRadius:10,padding:'6px 8px',textAlign:'center'}}>
+                <div style={{fontWeight:800,fontSize:16,color:'#c084fc'}}>{dailyEarned?.[u]||0}</div>
+                <div style={{color:'rgba(255,255,255,0.4)',fontSize:10}}>⭐ Today</div>
+              </div>
+              <div style={{flex:1,background:'rgba(255,255,255,0.04)',borderRadius:10,padding:'6px 8px',textAlign:'center'}}>
+                <div style={{fontWeight:800,fontSize:16,color:'#94a3b8'}}>{alltime?.[u]||0}</div>
+                <div style={{color:'rgba(255,255,255,0.4)',fontSize:10}}>🏆 All Time</div>
+              </div>
             </div>
+            {goals[u]&&<div style={{color:'rgba(255,255,255,0.4)',fontSize:12,marginTop:8}}>🎯 Goal: &ldquo;{goals[u]}&rdquo;</div>}
           </div>
         );
       })}
@@ -947,7 +1060,7 @@ function Toggle({on,color,onChange}) {
 /* ══════════════════════════════════════════
    SHARED KID VIEW  (renders Isabella or Jossy)
 ══════════════════════════════════════════ */
-function KidView({user,theme,tasks,comp,proofs,goal,rewards,rewardReqs,onToggle,onComplete,onSubmitProof,onSetGoal,onRequestReward,bal,logout}) {
+function KidView({user,theme,tasks,comp,proofs,goal,rewards,rewardReqs,onToggle,onComplete,onSubmitProof,onSetGoal,onRequestReward,bal,alltime,dailyEarned,avatar,logout}) {
   const isIsa = theme==='kawaii';
   const [kidTab, setKidTab] = useState('tasks');
   const done  = comp.length;
@@ -988,10 +1101,19 @@ function KidView({user,theme,tasks,comp,proofs,goal,rewards,rewardReqs,onToggle,
       {/* Header */}
       <div style={{background:headerBg,backdropFilter:'blur(14px)',borderBottom:`1px solid ${headerBdr}`,padding:'20px 20px 16px',position:'relative',zIndex:2}}>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-          <div>
-            <div style={{fontSize:24,fontWeight:isIsa?400:800}}>{title}</div>
-            <div style={{color:isIsa?'rgba(255,182,213,0.65)':'rgba(255,182,193,0.55)',fontSize:12,fontFamily:"'Nunito',sans-serif",fontWeight:600}}>
-              {subtitle} · {new Date().toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'})}
+          <div style={{display:'flex',alignItems:'center',gap:12}}>
+            {/* Avatar circle */}
+            {avatar
+              ? <div style={{width:48,height:48,borderRadius:'50%',overflow:'hidden',flexShrink:0,border:`2px solid ${accentColor}`,boxShadow:`0 0 14px ${accentColor}60`}}>
+                  <img src={avatar} alt={user} style={{width:'100%',height:'100%',objectFit:'cover'}}/>
+                </div>
+              : <div style={{fontSize:32,flexShrink:0}}>{isIsa?'🌸':'🕷️'}</div>
+            }
+            <div>
+              <div style={{fontSize:22,fontWeight:isIsa?400:800}}>{title}</div>
+              <div style={{color:isIsa?'rgba(255,182,213,0.65)':'rgba(255,182,193,0.55)',fontSize:12,fontFamily:"'Nunito',sans-serif",fontWeight:600}}>
+                {subtitle} · {new Date().toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'})}
+              </div>
             </div>
           </div>
           <button onClick={logout} style={{background:btnExitBg,border:`1px solid ${btnExitBdr}`,borderRadius:12,padding:'6px 14px',color:btnExitClr,cursor:'pointer',fontSize:13,fontFamily:"'Nunito',sans-serif"}}>Exit</button>
@@ -1014,17 +1136,25 @@ function KidView({user,theme,tasks,comp,proofs,goal,rewards,rewardReqs,onToggle,
         </div>
       </div>
 
-      {/* Stars badge — always visible */}
-      <div style={{padding:'14px 20px 4px',position:'relative',zIndex:2}}>
-        <div style={{display:'inline-flex',alignItems:'center',gap:8,background:isIsa?'rgba(255,215,0,0.12)':'rgba(233,30,99,0.15)',border:`1px solid ${isIsa?'rgba(255,215,0,0.3)':'rgba(255,107,157,0.35)'}`,borderRadius:20,padding:'6px 16px'}}>
-          <span style={{fontSize:16}}>🌟</span>
-          <span style={{fontFamily:"'Nunito',sans-serif",fontWeight:800,color:isIsa?'#ffd700':'#ff9dbe',fontSize:14}}>{bal} Koda stars{isIsa?' earned!':" earned 💅"}</span>
+      {/* Star breakdown — 3 stats */}
+      <div style={{padding:'12px 20px 4px',position:'relative',zIndex:2,display:'flex',gap:8}}>
+        <div style={{flex:1,background:isIsa?'rgba(255,215,0,0.12)':'rgba(233,30,99,0.15)',border:`1px solid ${isIsa?'rgba(255,215,0,0.3)':'rgba(255,107,157,0.35)'}`,borderRadius:14,padding:'8px 12px',textAlign:'center'}}>
+          <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:900,fontSize:20,color:isIsa?'#ffd700':'#ff9dbe'}}>{bal}</div>
+          <div style={{fontFamily:"'Nunito',sans-serif",fontSize:10,color:'rgba(255,255,255,0.5)',marginTop:1}}>🌟 Balance</div>
+        </div>
+        <div style={{flex:1,background:'rgba(255,255,255,0.05)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:14,padding:'8px 12px',textAlign:'center'}}>
+          <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:900,fontSize:20,color:'#c084fc'}}>{dailyEarned||0}</div>
+          <div style={{fontFamily:"'Nunito',sans-serif",fontSize:10,color:'rgba(255,255,255,0.5)',marginTop:1}}>⭐ Today</div>
+        </div>
+        <div style={{flex:1,background:'rgba(255,255,255,0.05)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:14,padding:'8px 12px',textAlign:'center'}}>
+          <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:900,fontSize:20,color:'#94a3b8'}}>{alltime||0}</div>
+          <div style={{fontFamily:"'Nunito',sans-serif",fontSize:10,color:'rgba(255,255,255,0.5)',marginTop:1}}>🏆 All Time</div>
         </div>
       </div>
 
       {/* STORE TAB */}
       {kidTab==='store'&&(
-        <KidStore rewards={rewards} rewardReqs={rewardReqs} bal={bal} isIsa={isIsa} onRequest={onRequestReward}/>
+        <KidStore rewards={rewards} rewardReqs={rewardReqs} bal={bal} alltime={alltime} dailyEarned={dailyEarned} isIsa={isIsa} onRequest={onRequestReward}/>
       )}
 
       {/* TASKS TAB */}
@@ -1522,7 +1652,7 @@ function ManageRewards({rewards,saveRewards}) {
     </div>
   );
 }
-function KidStore({rewards,rewardReqs,bal,isIsa,onRequest}) {
+function KidStore({rewards,rewardReqs,bal,alltime,dailyEarned,isIsa,onRequest}) {
   const accentColor=isIsa?'#f107a3':'#e91e63';
   const doneGradient=isIsa?'linear-gradient(135deg,#f107a3,#7b2ff7)':'linear-gradient(135deg,#8b0000,#e91e63)';
   const starColor=isIsa?'#ffd700':'#ff9dbe';
@@ -1530,11 +1660,20 @@ function KidStore({rewards,rewardReqs,bal,isIsa,onRequest}) {
 
   return(
     <div style={{padding:'16px 20px 100px',position:'relative',zIndex:2}}>
-      {/* Balance */}
-      <div style={{background:'rgba(255,255,255,0.06)',borderRadius:18,padding:'16px 20px',marginBottom:20,textAlign:'center',border:`1px solid ${accentColor}40`}}>
-        <div style={{fontSize:36,marginBottom:4,filter:`drop-shadow(0 0 12px ${accentColor})`}}>🌟</div>
-        <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:900,fontSize:32,color:starColor}}>{bal}</div>
-        <div style={{fontFamily:"'Nunito',sans-serif",fontSize:13,color:'rgba(255,255,255,0.5)',marginTop:2}}>Koda stars available</div>
+      {/* Star breakdown */}
+      <div style={{display:'flex',gap:8,marginBottom:20}}>
+        <div style={{flex:1,background:`${accentColor}14`,border:`1px solid ${accentColor}40`,borderRadius:14,padding:'12px 8px',textAlign:'center'}}>
+          <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:900,fontSize:26,color:starColor}}>{bal}</div>
+          <div style={{fontFamily:"'Nunito',sans-serif",fontSize:11,color:'rgba(255,255,255,0.5)',marginTop:2}}>🌟 Balance</div>
+        </div>
+        <div style={{flex:1,background:'rgba(255,255,255,0.05)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:14,padding:'12px 8px',textAlign:'center'}}>
+          <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:900,fontSize:26,color:'#c084fc'}}>{dailyEarned||0}</div>
+          <div style={{fontFamily:"'Nunito',sans-serif",fontSize:11,color:'rgba(255,255,255,0.5)',marginTop:2}}>⭐ Today</div>
+        </div>
+        <div style={{flex:1,background:'rgba(255,255,255,0.05)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:14,padding:'12px 8px',textAlign:'center'}}>
+          <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:900,fontSize:26,color:'#94a3b8'}}>{alltime||0}</div>
+          <div style={{fontFamily:"'Nunito',sans-serif",fontSize:11,color:'rgba(255,255,255,0.5)',marginTop:2}}>🏆 All Time</div>
+        </div>
       </div>
 
       <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:800,fontSize:16,color:'rgba(255,255,255,0.8)',marginBottom:14}}>✨ Available Rewards</div>
