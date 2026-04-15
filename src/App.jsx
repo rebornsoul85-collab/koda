@@ -5,7 +5,7 @@ import { getDatabase, ref, set, get, onValue } from "firebase/database";
 /* ══════════════════════════════════════════
    VERSION
 ══════════════════════════════════════════ */
-const VERSION = 'v17';
+const VERSION = 'v17b';
 
 /* ══════════════════════════════════════════
    FIREBASE
@@ -781,6 +781,7 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,
 
           {/* ── Backup & Restore ── */}
           <BackupRestore config={config} avatars={avatars} bal={bal} alltime={alltime}/>
+          <ResetToday/>
 
           {/* Avatar upload */}
           <div style={{marginBottom:24}}>
@@ -829,6 +830,69 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,
           {savedMsg&&<div style={{color:'#4ade80',textAlign:'center',marginTop:10,fontWeight:700}}>{savedMsg}</div>}
         </>}
       </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════
+   RESET TODAY  — clears today's task completions
+   Use if tasks show as done incorrectly
+══════════════════════════════════════════ */
+function ResetToday() {
+  const [status,    setStatus]    = useState('');
+  const [confirm,   setConfirm]   = useState(false);
+  const [resetting, setResetting] = useState(false);
+
+  const doReset = async () => {
+    setResetting(true);
+    setStatus('⏳ Resetting…');
+    try {
+      const today = TODAY();
+      await Promise.all([
+        S.set(`cm-c-isabella-${today}`,     JSON.stringify([])),
+        S.set(`cm-c-jocelyn-${today}`,      JSON.stringify([])),
+        S.set(`cm-daily-isabella-${today}`, '0'),
+        S.set(`cm-daily-jocelyn-${today}`,  '0'),
+        S.set(`cm-goal-isabella-${today}`,  ''),
+        S.set(`cm-goal-jocelyn-${today}`,   ''),
+      ]);
+      setStatus('✅ Done! All tasks reset for today. Reload the app on each device to see the changes.');
+      setConfirm(false);
+    } catch(e) {
+      setStatus(`❌ Error: ${e.message}`);
+    } finally {
+      setResetting(false);
+    }
+  };
+
+  return (
+    <div style={{marginBottom:24,background:'rgba(239,68,68,0.08)',border:'1px solid rgba(239,68,68,0.2)',borderRadius:16,padding:16}}>
+      <div style={{fontWeight:700,fontSize:15,marginBottom:6,color:'#f87171'}}>🔄 Reset Today&apos;s Tasks</div>
+      <div style={{color:'rgba(255,255,255,0.5)',fontSize:12,marginBottom:14,lineHeight:1.6}}>
+        Clears all of today&apos;s completed tasks for both girls and resets daily stars to zero. Use this if tasks are showing as already done when they shouldn&apos;t be. <strong style={{color:'rgba(255,255,255,0.7)'}}>Does not affect balances or all-time totals.</strong>
+      </div>
+
+      {!confirm ? (
+        <button onClick={()=>setConfirm(true)} style={{background:'rgba(239,68,68,0.15)',border:'1.5px solid rgba(239,68,68,0.4)',borderRadius:12,padding:'10px 20px',color:'#f87171',fontWeight:700,cursor:'pointer',fontSize:14,fontFamily:'inherit'}}>
+          🔄 Reset Today&apos;s Tasks
+        </button>
+      ) : (
+        <div>
+          <div style={{color:'#fbbf24',fontSize:13,marginBottom:10,fontWeight:600}}>⚠️ Are you sure? This will uncheck all tasks for both girls today.</div>
+          <div style={{display:'flex',gap:8}}>
+            <button onClick={doReset} disabled={resetting}
+              style={{flex:1,background:'rgba(239,68,68,0.2)',border:'1.5px solid rgba(239,68,68,0.5)',borderRadius:12,padding:'10px',color:'#f87171',fontWeight:700,cursor:resetting?'default':'pointer',fontSize:14,fontFamily:'inherit',opacity:resetting?0.6:1}}>
+              {resetting?'Resetting…':'Yes, Reset Now'}
+            </button>
+            <button onClick={()=>setConfirm(false)}
+              style={{flex:1,background:'rgba(255,255,255,0.08)',border:'1px solid rgba(255,255,255,0.15)',borderRadius:12,padding:'10px',color:'rgba(255,255,255,0.7)',cursor:'pointer',fontFamily:'inherit'}}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {status&&<div style={{marginTop:10,padding:'8px 12px',background:status.startsWith('✅')?'rgba(74,222,128,0.1)':'rgba(239,68,68,0.1)',border:`1px solid ${status.startsWith('✅')?'rgba(74,222,128,0.3)':'rgba(239,68,68,0.3)'}`,borderRadius:10,fontSize:12,color:status.startsWith('✅')?'#4ade80':'#f87171',lineHeight:1.5}}>{status}</div>}
     </div>
   );
 }
