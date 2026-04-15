@@ -5,7 +5,7 @@ import { getDatabase, ref, set, get, onValue } from "firebase/database";
 /* ══════════════════════════════════════════
    VERSION
 ══════════════════════════════════════════ */
-const VERSION = 'v15';
+const VERSION = 'v16';
 
 /* ══════════════════════════════════════════
    FIREBASE
@@ -195,6 +195,27 @@ export default function App() {
       document.head.appendChild(s);
     }
 
+    // ── Date-change detection ──────────────────────────────────────
+    // The Firebase listeners are date-keyed (cm-c-isabella-2026-04-15).
+    // If the app stays open past midnight, listeners point to the old date.
+    // Fix: reload the app whenever it regains focus on a new day.
+    const loadedDate = TODAY();
+
+    const checkDateChange = () => {
+      if (!document.hidden && TODAY() !== loadedDate) {
+        window.location.reload();
+      }
+    };
+
+    // visibilitychange fires when user switches back to the app tab
+    document.addEventListener('visibilitychange', checkDateChange);
+    // pageshow handles iOS Safari back-forward cache
+    window.addEventListener('pageshow', checkDateChange);
+    // Also schedule a midnight reload as a safety net
+    const now = new Date();
+    const msUntilMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()+1, 0, 0, 5).getTime() - now.getTime();
+    const midnightTimer = setTimeout(() => window.location.reload(), msUntilMidnight);
+
     // ── Load static config data once ──────────────────────────────
     const loadStatic = async () => {
       const today = TODAY();
@@ -315,7 +336,12 @@ export default function App() {
     listen('cm-avatar-jocelyn',  v => setAvatars(p => ({...p, jocelyn:  v || ''})));
 
     // Clean up all listeners when component unmounts
-    return () => unsubs.forEach(fn => fn());
+    return () => {
+      unsubs.forEach(fn => fn());
+      document.removeEventListener('visibilitychange', checkDateChange);
+      window.removeEventListener('pageshow', checkDateChange);
+      clearTimeout(midnightTimer);
+    };
   }, []);
 
   const saveConfig = async (c) => { setConfig(c); await S.set('cm-config', JSON.stringify(c)); };
