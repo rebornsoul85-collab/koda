@@ -5,7 +5,7 @@ import { getDatabase, ref, set, get, onValue } from "firebase/database";
 /* ══════════════════════════════════════════
    VERSION
 ══════════════════════════════════════════ */
-const VERSION = 'v16';
+const VERSION = 'v17';
 
 /* ══════════════════════════════════════════
    FIREBASE
@@ -54,7 +54,16 @@ const compressImage = (file) => new Promise((resolve, reject) => {
 /* ══════════════════════════════════════════
    CONSTANTS
 ══════════════════════════════════════════ */
-const TODAY = () => new Date().toISOString().slice(0,10);
+// CRITICAL: Use LOCAL date, not UTC.
+// toISOString() returns UTC — at 8pm Pacific that's already next day UTC.
+// This was causing tasks to save to tomorrow's key, so they never reset.
+const TODAY = () => {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
 const uid   = () => Math.random().toString(36).slice(2,9);
 const EMOJIS = ['🪥','🛏️','🧹','🗑️','👗','📚','🍽️','🚿','🐕','🌿','💪','✏️','🎒','🧺','🍎','⭐','🎯','🎨','🎮','🍳','🌸','🌟','🎀','🦋','🐱','🦊','🌈','🏃','🪴','💅','🕷️','🫧','☀️','🌅','🌙','💆','💇','🧼'];
 const TIME_GROUPS = ['morning','midday','afternoon','evening'];
