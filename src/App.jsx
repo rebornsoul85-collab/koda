@@ -5,7 +5,7 @@ import { getDatabase, ref, set, get, onValue } from "firebase/database";
 /* ══════════════════════════════════════════
    VERSION
 ══════════════════════════════════════════ */
-const VERSION = 'v17b';
+const VERSION = 'v19';
 
 /* ══════════════════════════════════════════
    FIREBASE
@@ -278,7 +278,15 @@ export default function App() {
       if (changed) await S.set('cm-config', JSON.stringify(cfg));
       setConfig(cfg);
       setRewards(rawRwds ? JSON.parse(rawRwds) : DEFAULT_REWARDS);
-      setActivity(rawAct ? JSON.parse(rawAct) : []);
+
+      // Only keep activity entries from today — clear old days automatically
+      const allActivity = rawAct ? JSON.parse(rawAct) : [];
+      const todayActivity = allActivity.filter(a => a.timestamp?.startsWith(today));
+      if (todayActivity.length !== allActivity.length) {
+        await S.set('cm-activity', JSON.stringify(todayActivity));
+      }
+      setActivity(todayActivity);
+
       setAvatars({ isabella: ibAv || '', jocelyn: jcAv || '' });
       setLoading(false);
     };
@@ -691,8 +699,14 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,
   const [redeemAmt,setRedeemAmt]=useState({isabella:'',jocelyn:''});
   const [newPins,setNewPins]=useState({mom:'',dad:'',isabella:'',jocelyn:''});
   const [savedMsg,setSavedMsg]=useState('');
-  const pendingProofs  = Object.keys(proofs.isabella||{}).length+Object.keys(proofs.jocelyn||{}).length;
-  const pendingRewards = rewardReqs.filter(r=>r.status==='pending').length;
+  // Only badge items this parent hasn't acted on yet
+  const myProofsPending = ['isabella','jocelyn'].reduce((acc, u) => {
+    return acc + Object.values(proofs[u]||{}).filter(p => p.firstApprovalBy !== parentName).length;
+  }, 0);
+  const myRewardsPending = rewardReqs.filter(r =>
+    (r.status === 'pending' || r.status === 'first_approved' || !r.status) &&
+    !(r.approvals||[]).includes(parentName)
+  ).length;
 
   const addTask=user=>{
     if(!newTask.title.trim())return;
@@ -712,8 +726,8 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,
 
   const TABS=[
     {id:'overview',  label:'🏠', title:'Overview'},
-    {id:'proof',     label:'📸', title:'Proof',    badge:pendingProofs},
-    {id:'rewards',   label:'🎁', title:'Requests', badge:pendingRewards},
+    {id:'proof',     label:'📸', title:'Proof',    badge:myProofsPending},
+    {id:'rewards',   label:'🎁', title:'Requests', badge:myRewardsPending},
     {id:'activity',  label:'📋', title:'Activity'},
     {id:'store',     label:'🛍️', title:'Rewards'},
     {id:'isabella',  label:'🌸', title:'Isabella'},
@@ -745,7 +759,7 @@ function ParentView({config,saveConfig,comp,bal,proofs,goals,rewards,rewardReqs,
 
       <div style={{padding:'20px',maxWidth:580,margin:'0 auto'}}>
 
-        {tab==='overview'&&<ParentOverview comp={comp} bal={bal} proofs={proofs} goals={goals} config={config} rewardReqs={rewardReqs} avatars={avatars} alltime={alltime} dailyEarned={dailyEarned} onShowProof={()=>setTab('proof')} onShowRewards={()=>setTab('rewards')}/>}
+        {tab==='overview'&&<ParentOverview comp={comp} bal={bal} proofs={proofs} goals={goals} config={config} rewardReqs={rewardReqs} avatars={avatars} alltime={alltime} dailyEarned={dailyEarned} parentName={parentName} onShowProof={()=>setTab('proof')} onShowRewards={()=>setTab('rewards')}/>}
         {tab==='proof'&&<ProofInbox proofs={proofs} config={config} onApprove={approveProof} onReject={rejectProof} parentName={parentName}/>}
         {tab==='rewards'&&<RewardRequests rewardReqs={rewardReqs} bal={bal} onApprove={approveRewardReq} onDeny={denyRewardReq} parentName={parentName}/>}
         {tab==='activity'&&<ActivityLog activity={activity}/>}
@@ -1022,9 +1036,17 @@ function BackupRestore({config, avatars, bal, alltime}) {
   );
 }
 
-function ParentOverview({comp,bal,proofs,goals,config,rewardReqs,avatars,alltime,dailyEarned,onShowProof,onShowRewards}) {
-  const pendingProofs  = Object.keys(proofs.isabella||{}).length+Object.keys(proofs.jocelyn||{}).length;
-  const pendingRewards = rewardReqs.filter(r=>r.status==='pending'||r.status==='first_approved'||(r.status===undefined)).length;
+function ParentOverview({comp,bal,proofs,goals,config,rewardReqs,avatars,alltime,dailyEarned,parentName,onShowProof,onShowRewards}) {
+  // Only count items this specific parent still needs to act on
+  const myProofsPending = ['isabella','jocelyn'].reduce((acc, u) => {
+    return acc + Object.values(proofs[u]||{}).filter(p => p.firstApprovalBy !== parentName).length;
+  }, 0);
+  const totalProofsPending = Object.keys(proofs.isabella||{}).length + Object.keys(proofs.jocelyn||{}).length;
+  const myRewardsPending = rewardReqs.filter(r =>
+    (r.status==='pending'||r.status==='first_approved'||!r.status) &&
+    !(r.approvals||[]).includes(parentName)
+  ).length;
+  const totalRewardsPending = rewardReqs.filter(r=>r.status==='pending'||r.status==='first_approved'||!r.status).length;
   return(
     <>
       <h2 style={{fontWeight:800,fontSize:20,marginBottom:16}}>📊 Today&apos;s Overview</h2>
@@ -1071,22 +1093,34 @@ function ParentOverview({comp,bal,proofs,goals,config,rewardReqs,avatars,alltime
           </div>
         );
       })}
-      {pendingProofs>0&&(
+      {myProofsPending>0&&(
         <div onClick={onShowProof} style={{background:'rgba(251,191,36,0.1)',border:'1px solid rgba(251,191,36,0.35)',borderRadius:14,padding:'14px 18px',cursor:'pointer',display:'flex',alignItems:'center',gap:12,marginTop:4}}>
           <span style={{fontSize:28}}>📸</span>
           <div style={{flex:1}}>
-            <div style={{fontWeight:700,color:'#fbbf24'}}>{pendingProofs} photo{pendingProofs>1?'s':''} waiting for your approval!</div>
+            <div style={{fontWeight:700,color:'#fbbf24'}}>{myProofsPending} photo{myProofsPending>1?'s':''} need your approval!</div>
             <div style={{fontSize:12,color:'rgba(255,255,255,0.4)',marginTop:2}}>Tap to review →</div>
           </div>
         </div>
       )}
-      {pendingRewards>0&&(
+      {myProofsPending===0&&totalProofsPending>0&&(
+        <div style={{background:'rgba(74,222,128,0.08)',border:'1px solid rgba(74,222,128,0.2)',borderRadius:14,padding:'12px 18px',display:'flex',alignItems:'center',gap:10,marginTop:4}}>
+          <span style={{fontSize:20}}>✅</span>
+          <div style={{fontSize:13,color:'rgba(74,222,128,0.8)'}}>You&apos;ve approved all photos — waiting for {parentName==='Mom'?'Dad':'Mom'} to confirm</div>
+        </div>
+      )}
+      {myRewardsPending>0&&(
         <div onClick={onShowRewards} style={{background:'rgba(99,179,237,0.1)',border:'1px solid rgba(99,179,237,0.35)',borderRadius:14,padding:'14px 18px',cursor:'pointer',display:'flex',alignItems:'center',gap:12,marginTop:8}}>
           <span style={{fontSize:28}}>🎁</span>
           <div style={{flex:1}}>
-            <div style={{fontWeight:700,color:'#60a5fa'}}>{pendingRewards} reward request{pendingRewards>1?'s':''} waiting!</div>
+            <div style={{fontWeight:700,color:'#60a5fa'}}>{myRewardsPending} reward request{myRewardsPending>1?'s':''} need your approval!</div>
             <div style={{fontSize:12,color:'rgba(255,255,255,0.4)',marginTop:2}}>Tap to approve or deny →</div>
           </div>
+        </div>
+      )}
+      {myRewardsPending===0&&totalRewardsPending>0&&(
+        <div style={{background:'rgba(74,222,128,0.08)',border:'1px solid rgba(74,222,128,0.2)',borderRadius:14,padding:'12px 18px',display:'flex',alignItems:'center',gap:10,marginTop:8}}>
+          <span style={{fontSize:20}}>✅</span>
+          <div style={{fontSize:13,color:'rgba(74,222,128,0.8)'}}>You&apos;ve approved all requests — waiting for {parentName==='Mom'?'Dad':'Mom'} to confirm</div>
         </div>
       )}
       <RewardQueue rewardReqs={rewardReqs} isParent={true}/>
@@ -1825,10 +1859,18 @@ function RewardQueue({rewardReqs, isParent}) {
 }
 
 function ActivityLog({activity}) {
+  const [clearing, setClearing] = useState(false);
+
+  const clearLog = async () => {
+    setClearing(true);
+    await S.set('cm-activity', JSON.stringify([]));
+    setClearing(false);
+  };
+
   if(!activity||activity.length===0) return(
     <div style={{textAlign:'center',padding:'60px 20px'}}>
       <div style={{fontSize:48,marginBottom:12}}>📋</div>
-      <div style={{color:'rgba(255,255,255,0.5)',fontSize:16,fontWeight:600}}>No activity yet!</div>
+      <div style={{color:'rgba(255,255,255,0.5)',fontSize:16,fontWeight:600}}>No activity today!</div>
       <div style={{color:'rgba(255,255,255,0.3)',fontSize:13,marginTop:6}}>Approved and denied rewards will show up here.</div>
     </div>
   );
@@ -1840,8 +1882,13 @@ function ActivityLog({activity}) {
   };
   return(
     <div>
-      <h2 style={{fontWeight:800,fontSize:20,marginBottom:6}}>📋 Activity Log</h2>
-      <p style={{color:'rgba(255,255,255,0.4)',fontSize:13,marginBottom:20}}>Recent reward decisions</p>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+        <h2 style={{fontWeight:800,fontSize:20,margin:0}}>📋 Activity Log</h2>
+        <button onClick={clearLog} disabled={clearing} style={{background:'rgba(239,68,68,0.12)',border:'1px solid rgba(239,68,68,0.25)',borderRadius:10,padding:'6px 12px',color:'#f87171',cursor:'pointer',fontSize:12,fontFamily:'inherit',fontWeight:600}}>
+          {clearing?'Clearing…':'🗑️ Clear'}
+        </button>
+      </div>
+      <p style={{color:'rgba(255,255,255,0.4)',fontSize:13,marginBottom:20}}>Today&apos;s reward decisions · resets daily</p>
       {activity.slice(0,30).map(item=>{
         const isApproved=item.type==='approved';
         const isIsa=item.user==='isabella';
