@@ -5,7 +5,7 @@ import { getDatabase, ref, set, get, onValue } from "firebase/database";
 /* ══════════════════════════════════════════
    VERSION
 ══════════════════════════════════════════ */
-const VERSION = 'v19';
+const VERSION = 'v20';
 
 /* ══════════════════════════════════════════
    FIREBASE
@@ -1995,6 +1995,46 @@ function KidStore({rewards,rewardReqs,bal,alltime,dailyEarned,isIsa,onRequest}) 
           <div style={{fontFamily:"'Nunito',sans-serif",fontSize:11,color:'rgba(255,255,255,0.5)',marginTop:2}}>🏆 All Time</div>
         </div>
       </div>
+
+      {/* Today's Receipt — approved purchases only, today only */}
+      {(()=>{
+        const todayStr=TODAY();
+        const currentUser=isIsa?'isabella':'jocelyn';
+        const todaysPurchases=rewardReqs.filter(r=>
+          r.status==='approved'
+          && r.user===currentUser
+          && r.resolvedAt
+          && r.resolvedAt.slice(0,10)===todayStr
+        );
+        if(todaysPurchases.length===0)return null;
+        const totalSpent=todaysPurchases.reduce((sum,r)=>sum+(r.stars||0),0);
+        return(
+          <div style={{background:'rgba(74,222,128,0.06)',border:'1px dashed rgba(74,222,128,0.35)',borderRadius:18,padding:'14px 16px',marginBottom:20}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+              <div style={{fontFamily:ff,fontWeight:800,fontSize:15,color:'#4ade80'}}>🧾 Today's Receipt</div>
+              <div style={{fontFamily:"'Nunito',sans-serif",fontSize:11,color:'rgba(255,255,255,0.45)'}}>{todaysPurchases.length} item{todaysPurchases.length===1?'':'s'}</div>
+            </div>
+            {todaysPurchases.map(r=>{
+              const t=r.resolvedAt?new Date(r.resolvedAt):null;
+              const timeStr=t?t.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'';
+              return(
+                <div key={r.id} style={{display:'flex',alignItems:'center',gap:10,padding:'8px 0',borderBottom:'1px solid rgba(255,255,255,0.06)'}}>
+                  <span style={{fontSize:20}}>{r.rewardEmoji}</span>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:600,fontSize:13,color:'white',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.rewardTitle}</div>
+                    <div style={{fontFamily:"'Nunito',sans-serif",fontSize:10,color:'rgba(255,255,255,0.4)',marginTop:1}}>{timeStr}</div>
+                  </div>
+                  <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:700,fontSize:13,color:starColor,flexShrink:0}}>−{r.stars} 🌟</div>
+                </div>
+              );
+            })}
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',paddingTop:10,marginTop:4}}>
+              <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:800,fontSize:13,color:'rgba(255,255,255,0.7)'}}>Total spent today</div>
+              <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:900,fontSize:16,color:starColor}}>−{totalSpent} 🌟</div>
+            </div>
+          </div>
+        );
+      })()}
 
       <div style={{fontFamily:"'Nunito',sans-serif",fontWeight:800,fontSize:16,color:'rgba(255,255,255,0.8)',marginBottom:14}}>✨ Available Rewards</div>
 
